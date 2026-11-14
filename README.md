@@ -1,45 +1,33 @@
 # Mobile Labs
 
-**OBS-powered live streaming and local recording for Android tablets**, built with a hybrid architecture pairing the real `libobs` C/C++ engine (`obs-studio` 32.2.1 baseline) with a native Kotlin + Jetpack Compose tablet studio workspace, engineered for the **Samsung Galaxy Tab A9+ (8 GB, Android 16)**.
+**OBS-powered live streaming and local recording for Android tablets**, pairing the `libobs` C/C++ architecture (`obs-studio` 32.2.1 baseline) with a native Kotlin + Jetpack Compose 1:1 OBS Studio Classic Dark tablet workspace engineered for the **Samsung Galaxy Tab A9+ (8 GB, Android 16)**.
 
-## Phase 1 & Phase 2 Architecture Summary
+## Architecture & Phase 1–3 Features
 
-- **Core Engine (`app/src/main/cpp/`)**:
-  - Real `libobs` (`obs_startup`, `obs_reset_video`, `obs_reset_audio`, scene items, transitions, audio filters) connected over NDK/JNI (`mobilelabs_jni.cpp`).
-  - Custom `mobilelabs_mediacodec_h264` OBS encoder module (`mediacodec_obs_encoder.cpp`) using hardware `AMediaCodec` `COLOR_FormatSurface` zero-copy texture handoff + live bitrate updates + bounded back-pressure queues.
-  - Time-boxed Vulkan spike header (`vulkan_spike_probe.h`) evaluating Gate V2 (`GLES3/EGL` retained in production; see `docs/PHASE2_DECISION_REPORTS.md`).
-- **Compositor, Sources & GPU Filters (`app/src/main/java/com/example/mobilelabs/media/`)**:
-  - `GlZeroCopyCompositor`: Multi-layer GLES3/EGL renderer supporting `Screen Capture`, `Camera2`, `Image`, hardware `MediaSourceDecoder` (`MediaExtractor` + `MediaCodec` -> Surface), cached `Text`, and `Color` sources. Executes GPU **Color Correction, Crop/Pad, Scale/Aspect, Chroma Key, 3x3 Sharpen, and 4 LUT presets** completely in fragment shaders with zero CPU pixel copies.
-  - Supports **Studio Mode** (split Preview | Program viewports; encoder strictly sees Program) and **5 Transitions** (`Cut`, `Fade`, `Slide`, `Swipe`, `Fade-to-Color`).
-- **Audio Engine & DSP (`AudioCaptureMixer.kt`)**:
-  - 48 kHz stereo `AudioPlaybackCapture` + `AudioRecord` mic mixer with per-channel zero-allocation DSP (**Gain, Android `NoiseSuppressor` + High-Pass, Noise Gate, Compressor, Peak Limiter**), master soft-limiter, and `AudioDeviceCallback` routing.
-- **Workspace UI & Canvas Editor (`app/src/main/java/com/example/mobilelabs/ui/`)**:
-  - Classic 5-dock OBS layout (**Scenes**, **Sources**, **Audio Mixer**, **Scene Transitions**, **Controls**) with Dock Swap full-height expand, full Scene/Source CRUD, interactive touch canvas editor (move, resize, 90°-snapping rotate, crop, center snap guides, Undo/Redo, Live safety lock), and 5-tab Settings.
-- **Persistence & Interop (`persistence/` & `security/`)**:
-  - `SceneCollectionRepository`: Atomic JSON + `.bak` backups for scene collections, profiles, audio/video filters, SAF media asset copies, and incomplete-recording crash recovery markers.
-  - `ObsJsonImporterExporter`: Full OBS Studio JSON Scene Collection export & validated import (missing asset detection + zero secret leakage).
-  - `KeystoreSecretStore`: AES-256-GCM encryption in `AndroidKeyStore` for RTMP stream keys.
-- **Floating Aperture Control v2 (`FloatingApertureOverlay.kt`)**:
-  - Opt-in `TYPE_APPLICATION_OVERLAY` plain-View circular badge & compact 2-row quick bar (`Stream`, `Record`, `Mute Mic`, `Mute Game`, `Next Scene`, `Preset`, `Open UI`) with 3 s dim, 4 s auto-collapse, and 2-tap stop confirm.
+- **1:1 Classic OBS Studio Dark Workspace (`app/src/main/java/com/example/mobilelabs/ui/`)**:
+  - Top OBS Menu Bar (`File | Edit | View | Profile | Scene Collection | Tools | Help`), full-width dark bezel around a 16:9 black canvas, split **Studio Mode** (`PREVIEW | PROGRAM`), and **5 Classic OBS Bottom Docks** (**Scenes**, **Sources**, **Audio Mixer** with `-60..0 dB` scale & segmented peak meters, **Scene Transitions** dropdown + duration stepper, and stacked **Controls**), plus a live OBS bottom status bar.
+  - Zero-lag Compose isolation keeps 1 Hz telemetry and audio meter updates out of the GLES3 `SurfaceView` preview pass.
+- **Core Engine & Compositor (`app/src/main/cpp/` & `media/`)**:
+  - `libobs` JNI bridge (`mobilelabs_jni.cpp`) + custom `mobilelabs_mediacodec_h264` encoder bindings.
+  - `GlZeroCopyCompositor`: Multi-layer GLES3/EGL zero-copy renderer supporting `Screen Capture`, `Camera2`, `Image`, hardware `MediaSourceDecoder`, cached `Text`, and `Color` sources, 5 scene transitions, and GPU fragment filters (Color Correction, Chroma Key, 3x3 Sharpen, 4 LUT presets). Vulkan Gate V3 formally retains GLES3 as production default (`docs/PHASE3_BENCHMARK_AND_RELEASE.md`).
+  - `HardwareMediaPipeline`: Single shared hardware H.264 + AAC MediaCodec encode feeding local MP4 recording and up to **2 independent RTMP/RTMPS destinations (Dual Destination M3.4)** with bounded-queue back-pressure.
+- **Audio DSP & Adaptive Protection**:
+  - 48 kHz stereo `AudioPlaybackCapture` + `AudioRecord` mixer with Gain, Android `NoiseSuppressor`, Noise Gate, Compressor, and Peak Limiter.
+  - `AdaptiveQualityEngine` (`L0`–`L5`) with strict hysteresis (>=5 s step-down, >=120 s/300 s recovery, 15 s cooldown, user `"Don't adapt"` lock) + `SamsungOneUiAdvisor`.
+- **Persistence, Security & Recovery**:
+  - `SceneCollectionRepository` atomic JSON + `.bak` backups, OBS Studio JSON import/export, incomplete recording crash recovery, `LocalCrashHandler` (redacted local crash log), and AES-256-GCM `AndroidKeyStore` encryption for primary & secondary stream keys.
 
-## Toolchain & Reproducible Clean-Checkout Build
+## How to Build the APK with GitHub Actions
 
-- **JDK**: 17
-- **Android Compile SDK / Build Tools**: 36 / 36.0.0 (`minSdk = 29`, `targetSdk = 35`)
-- **NDK / CMake / Ninja**: Android NDK 27.2.12479018+ (or 30.0.16138531), CMake 3.31.6, Ninja 1.13.2
-- **Pinned `libobs` Baseline**: `obsproject/obs-studio` commit `57bfcf10a` (32.2.1)
+1. Push this repository to GitHub (branches `main`, `master`, or `develop`) or trigger **Actions -> Mobile Labs Android CI -> Run workflow** manually.
+2. The **`build-android-apk`** job automatically installs JDK 17, Android SDK 36, Gradle 9.3.1, runs all unit + Robolectric tests, runs Android Lint, builds `app/build/outputs/apk/debug/app-debug.apk`, and uploads it as **`mobile-labs-debug-apk`** under workflow **Artifacts**.
+3. Download `mobile-labs-debug-apk.zip`, unzip `app-debug.apk`, and install it directly on your Samsung Galaxy Tab A9+.
 
-### Local Build (WSL2 / Linux)
+## Local WSL2 / Linux Build
 
 ```bash
-export ANDROID_NDK_HOME=/path/to/android-ndk
 bash scripts/build_wsl2.sh
+# Optional native libobs build when prebuilt NDK deps are present:
+export ANDROID_NDK_HOME=/path/to/android-ndk
+BUILD_LIBOBS=1 bash scripts/build_wsl2.sh
 ```
-
-### GitHub Actions CI
-
-`.github/workflows/android-ci.yml` builds cleanly on every push/PR:
-1. Installs JDK 17, Android SDK 36, NDK, CMake 3.31.6, Ninja.
-2. Fetches and compiles pinned `libobs` (`arm64-v8a`) via `scripts/fetch_and_build_obs.sh`.
-3. Runs `:app:testDebugUnitTest -PwithLibObs=true`.
-4. Assembles `:app:assembleDebug -PwithLibObs=true`, verifies `arm64-v8a` `.so` packaging and SHA-256 checksums, and uploads `mobile-labs-debug-arm64-v8a`.

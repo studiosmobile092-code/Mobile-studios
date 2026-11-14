@@ -8,28 +8,28 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.unit.dp
 
 private val MobileLabsColorScheme = darkColorScheme(
-    primary = ApertureRed,
+    primary = ObsSelectionBlue,
     onPrimary = StudioText,
-    primaryContainer = ApertureRedHi,
+    primaryContainer = ApertureRed,
     onPrimaryContainer = StudioText,
-    secondary = SurfaceLevel2,
+    secondary = ObsControlBtn,
     onSecondary = StudioText,
-    background = StudioBg,
+    background = ObsWindowBg,
     onBackground = StudioText,
-    surface = SurfaceLevel1,
+    surface = ObsHeaderBg,
     onSurface = StudioText,
-    surfaceVariant = SurfaceLevel2,
+    surfaceVariant = ObsWellBg,
     onSurfaceVariant = StudioTextDim,
-    outline = StudioDivider,
+    outline = ObsBorder,
     error = StatusCritical,
     onError = StudioText
 )
 
 private val MobileLabsShapes = Shapes(
-    extraSmall = RoundedCornerShape(4.dp),
-    small = RoundedCornerShape(6.dp),
-    medium = RoundedCornerShape(6.dp),
-    large = RoundedCornerShape(8.dp)
+    extraSmall = RoundedCornerShape(2.dp),
+    small = RoundedCornerShape(3.dp),
+    medium = RoundedCornerShape(4.dp),
+    large = RoundedCornerShape(6.dp)
 )
 
 @Composable

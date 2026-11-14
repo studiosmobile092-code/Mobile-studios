@@ -139,6 +139,81 @@ enum class RtmpServicePreset(val label: String, val defaultUrl: String) {
     YOUTUBE("YouTube Live", "rtmps://a.rtmps.youtube.com:443/live2")
 }
 
+// Phase 3: Adaptive Quality Ladder (§12.3 M3.1)
+enum class AdaptiveQualityLevel(val shortTag: String, val title: String, val bitrateScale: Float) {
+    L0_NORMAL("L0", "Normal (Full Preset)", 1.0f),
+    L1_MILD_THROTTLE("L1", "Mild Load (-20% Bitrate, Pause HUD)", 0.80f),
+    L2_SUSTAINED_LOAD("L2", "Sustained Load (-40% Bitrate, Suspend Heavy FX)", 0.60f),
+    L3_SEVERE_THERMAL("L3", "Severe Thermal (Low-Overhead 720p30)", 0.55f),
+    L4_PROLONGED_SEVERE("L4", "Prolonged Severe (Camera Off, Screen Only)", 0.50f),
+    L5_CRITICAL_STOP("L5", "Critical Thermal (Finalize & Stop Stream)", 0.0f)
+}
+
+data class AdaptiveQualityState(
+    val level: AdaptiveQualityLevel = AdaptiveQualityLevel.L0_NORMAL,
+    val lockedByUser: Boolean = false,
+    val lastChangeReason: String = "Nominal headroom",
+    val activeActions: List<String> = emptyList(),
+    val decisionHistory: List<String> = emptyList()
+)
+
+// Phase 3: Dual RTMP(S) Destination sharing the single MediaCodec encode (M3.4)
+data class DualDestinationState(
+    val enabled: Boolean = false,
+    val preset: RtmpServicePreset = RtmpServicePreset.TWITCH,
+    val serverUrl: String = RtmpServicePreset.TWITCH.defaultUrl,
+    val hasKeySaved: Boolean = false,
+    val maskedKeyPreview: String = "Not set",
+    val phase: SessionPhase = SessionPhase.IDLE,
+    val errorReason: String? = null,
+    val bufferedBytes: Long = 0L,
+    val droppedFrames: Long = 0L
+)
+
+// Phase 3: Gaming Scene Presets (M3.2)
+enum class GamingScenePreset(val label: String, val description: String) {
+    GAME_ONLY("Game Only", "Full 16:9 screen capture with audio mixer"),
+    GAME_FACECAM("Game + Facecam", "16:9 screen capture + corner Camera2 PiP"),
+    GAME_FACECAM_CHAT("Game + Facecam + Chat Box", "Screen + Facecam + styled Chat/Alert container placeholder"),
+    INTERMISSION_PACK("Starting Soon / BRB / Ending Pack", "Adds 3 editable intermission scenes with brand backdrop + titles")
+}
+
+// Phase 3: Samsung / One UI Awareness (M3.3)
+data class SamsungOneUiStatus(
+    val isSamsungDevice: Boolean = false,
+    val deviceDisplayModel: String = "",
+    val ramTierLabel: String = "Unknown RAM",
+    val isBatteryOptimizationExempt: Boolean = false,
+    val displayMaxRefreshHz: Float = 60f,
+    val guidanceNotes: List<String> = emptyList()
+)
+
+// Phase 3: Auto-Tune Probe Result (M3.6)
+data class AutoTuneResult(
+    val completedAtIso: String,
+    val recommendedPreset: PresetId,
+    val hwAvcEncodersFound: Int,
+    val supports1080p60: Boolean,
+    val ramMb: Long,
+    val thermalHeadroom: Float,
+    val summary: String
+)
+
+// Phase 3: Benchmark Kit Record (§14.4 M3.7)
+data class BenchmarkRecord(
+    val id: String,
+    val appName: String,
+    val presetLabel: String,
+    val gameName: String,
+    val gameAvgFps: Float,
+    val gameOnePercentLowFps: Float,
+    val streamDroppedPct: Float,
+    val peakThermalLabel: String,
+    val processPssMb: Int,
+    val notes: String,
+    val recordedAtIso: String
+)
+
 data class VideoConfig(
     val presetId: PresetId = PresetId.BALANCED,
     val canvasWidth: Int = 1280,
@@ -333,6 +408,7 @@ data class DeviceAndCodecReport(
 data class MobileLabsUiState(
     val engineBackend: EngineBackendStatus = EngineBackendStatus.ANDROID_HARDWARE_PIPELINE,
     val libObsVersion: String = "32.2.1 (commit 57bfcf10a)",
+    val appVersionLabel: String = "1.0.0-rc1",
     val sessionPhase: SessionPhase = SessionPhase.IDLE,
     val recordingPhase: RecordingPhase = RecordingPhase.IDLE,
     val statusMessage: String = "Ready — Tap Arm Capture to authorize MediaProjection",
@@ -363,6 +439,14 @@ data class MobileLabsUiState(
     val rtmpServerUrl: String = RtmpServicePreset.CUSTOM.defaultUrl,
     val hasStreamKeySaved: Boolean = false,
     val maskedStreamKeyPreview: String = "Not set",
+    val dualDestination: DualDestinationState = DualDestinationState(),
+    val adaptiveQuality: AdaptiveQualityState = AdaptiveQualityState(),
+    val samsungStatus: SamsungOneUiStatus = SamsungOneUiStatus(),
+    val autoTuneResult: AutoTuneResult? = null,
+    val onboardingCompleted: Boolean = true,
+    val lastCrashSummary: String? = null,
+    val benchmarkRecords: List<BenchmarkRecord> = emptyList(),
+    val vulkanDecisionLabel: String = "V3 Closed -> GLES3 Production Default",
     val customRecordingFolderUri: String? = null,
     val floatingOverlayEnabled: Boolean = false,
     val hasOverlayPermission: Boolean = false,
@@ -382,20 +466,33 @@ data class MobileLabsUiState(
 fun defaultSceneCollection(): SceneCollection {
     val gameScene = SceneModel(
         id = "scene_game",
-        name = "Scene 1 · Game + Facecam",
+        name = "Scene",
         sources = listOf(
             SourceModel(
                 id = "src_screen",
-                name = "Tablet Screen (16:9 Fit)",
+                name = "Tablet Screen (16:9)",
+                type = SourceType.SCREEN_CAPTURE,
+                visible = true,
+                locked = false
+            )
+        )
+    )
+    val desktopScene = SceneModel(
+        id = "scene_desktop",
+        name = "Game + Facecam",
+        sources = listOf(
+            SourceModel(
+                id = "src_screen_gf",
+                name = "Tablet Screen (16:9)",
                 type = SourceType.SCREEN_CAPTURE,
                 visible = true,
                 locked = false
             ),
             SourceModel(
-                id = "src_camera",
+                id = "src_camera_gf",
                 name = "Front Facecam",
                 type = SourceType.CAMERA_2,
-                visible = false,
+                visible = true,
                 locked = false,
                 useFrontCamera = true,
                 transform = SourceTransform(
@@ -409,7 +506,7 @@ fun defaultSceneCollection(): SceneCollection {
     )
     val brbScene = SceneModel(
         id = "scene_intermission",
-        name = "Scene 2 · Intermission",
+        name = "Intermission",
         sources = listOf(
             SourceModel(
                 id = "src_brb_bg",
@@ -433,7 +530,7 @@ fun defaultSceneCollection(): SceneCollection {
         id = "col_default",
         name = "Tab A9+ Gaming",
         activeSceneId = gameScene.id,
-        scenes = listOf(gameScene, brbScene)
+        scenes = listOf(gameScene, desktopScene, brbScene)
     )
 }
 

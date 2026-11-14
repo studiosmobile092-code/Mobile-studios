@@ -18,7 +18,7 @@ import javax.crypto.spec.GCMParameterSpec
 private val Context.secretsDataStore by preferencesDataStore(name = "mobilelabs_keystore_secrets")
 
 /**
- * Stores RTMP stream keys encrypted via Android Keystore (AES-256-GCM).
+ * Stores primary & secondary RTMP stream keys encrypted via Android Keystore (AES-256-GCM).
  * Stream keys are never written to logs, crash dumps, or diagnostics exports (Iron Rule R13).
  */
 class KeystoreSecretStore(private val context: Context) {
@@ -27,6 +27,11 @@ class KeystoreSecretStore(private val context: Context) {
     private val encryptedKeyPref = stringPreferencesKey("encrypted_rtmp_stream_key")
     private val serverUrlPref = stringPreferencesKey("rtmp_server_url")
     private val presetPref = stringPreferencesKey("rtmp_service_preset")
+
+    // Secondary RTMP destination (M3.4 Dual Destination)
+    private val secondaryEncryptedKeyPref = stringPreferencesKey("encrypted_secondary_rtmp_stream_key")
+    private val secondaryServerUrlPref = stringPreferencesKey("secondary_rtmp_server_url")
+    private val secondaryPresetPref = stringPreferencesKey("secondary_rtmp_service_preset")
 
     suspend fun saveStreamConfig(presetName: String, serverUrl: String, streamKeyPlain: String?) {
         context.secretsDataStore.edit { prefs ->
@@ -42,28 +47,55 @@ class KeystoreSecretStore(private val context: Context) {
         }
     }
 
+    suspend fun saveSecondaryStreamConfig(presetName: String, serverUrl: String, streamKeyPlain: String?) {
+        context.secretsDataStore.edit { prefs ->
+            prefs[secondaryPresetPref] = presetName
+            prefs[secondaryServerUrlPref] = serverUrl.trim()
+            if (streamKeyPlain != null) {
+                if (streamKeyPlain.isBlank()) {
+                    prefs.remove(secondaryEncryptedKeyPref)
+                } else {
+                    prefs[secondaryEncryptedKeyPref] = encryptString(streamKeyPlain.trim())
+                }
+            }
+        }
+    }
+
     suspend fun loadServerUrl(): String = runCatching {
-        val prefs = context.secretsDataStore.data.first()
-        prefs[serverUrlPref].orEmpty()
+        context.secretsDataStore.data.first()[serverUrlPref].orEmpty()
     }.getOrDefault("")
 
     suspend fun loadPresetName(): String? = runCatching {
-        val prefs = context.secretsDataStore.data.first()
-        prefs[presetPref]
+        context.secretsDataStore.data.first()[presetPref]
     }.getOrNull()
 
     suspend fun loadStreamKey(): String = runCatching {
-        val prefs = context.secretsDataStore.data.first()
-        val encoded = prefs[encryptedKeyPref] ?: return@runCatching ""
+        val encoded = context.secretsDataStore.data.first()[encryptedKeyPref] ?: return@runCatching ""
         decryptString(encoded)
     }.getOrDefault("")
 
-    suspend fun hasStreamKey(): Boolean {
-        return loadStreamKey().isNotBlank()
-    }
+    suspend fun hasStreamKey(): Boolean = loadStreamKey().isNotBlank()
 
-    suspend fun getMaskedPreview(): String {
-        val key = loadStreamKey()
+    suspend fun getMaskedPreview(): String = maskKey(loadStreamKey())
+
+    suspend fun loadSecondaryServerUrl(): String = runCatching {
+        context.secretsDataStore.data.first()[secondaryServerUrlPref].orEmpty()
+    }.getOrDefault("")
+
+    suspend fun loadSecondaryPresetName(): String? = runCatching {
+        context.secretsDataStore.data.first()[secondaryPresetPref]
+    }.getOrNull()
+
+    suspend fun loadSecondaryStreamKey(): String = runCatching {
+        val encoded = context.secretsDataStore.data.first()[secondaryEncryptedKeyPref] ?: return@runCatching ""
+        decryptString(encoded)
+    }.getOrDefault("")
+
+    suspend fun hasSecondaryStreamKey(): Boolean = loadSecondaryStreamKey().isNotBlank()
+
+    suspend fun getSecondaryMaskedPreview(): String = maskKey(loadSecondaryStreamKey())
+
+    private fun maskKey(key: String): String {
         if (key.isBlank()) return "Not set"
         return if (key.length <= 4) "••••" else "••••••${key.takeLast(4)}"
     }
@@ -115,10 +147,17 @@ class KeystoreSecretStore(private val context: Context) {
     }
 
     companion object {
-        fun redactUrlAndKeys(input: String, streamKey: String? = null): String {
+        fun redactUrlAndKeys(
+            input: String,
+            streamKey: String? = null,
+            extraKeys: List<String> = emptyList()
+        ): String {
             var out = input
             if (!streamKey.isNullOrBlank()) {
                 out = out.replace(streamKey, "[REDACTED_KEY]")
+            }
+            extraKeys.filter { it.isNotBlank() }.forEach { extra ->
+                out = out.replace(extra, "[REDACTED_KEY]")
             }
             // Strip RTMP stream key suffix and query tokens in logs/diagnostics
             out = out.replace(

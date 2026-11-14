@@ -19,46 +19,59 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ArrowDownward
-import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.CloseFullscreen
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.Monitor
 import androidx.compose.material.icons.filled.OpenInFull
-import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.mobilelabs.model.AudioChannelState
 import com.example.mobilelabs.model.DockPanelId
 import com.example.mobilelabs.model.MobileLabsUiState
@@ -73,14 +86,17 @@ import com.example.ui.theme.MeterGreen
 import com.example.ui.theme.MeterRed
 import com.example.ui.theme.MeterTrack
 import com.example.ui.theme.MeterYellow
+import com.example.ui.theme.ObsBorder
+import com.example.ui.theme.ObsControlBtn
+import com.example.ui.theme.ObsHeaderBg
+import com.example.ui.theme.ObsSelectionBlue
+import com.example.ui.theme.ObsSliderBlue
+import com.example.ui.theme.ObsWellBg
+import com.example.ui.theme.ObsWindowBg
 import com.example.ui.theme.StatusOk
 import com.example.ui.theme.StatusWarn
-import com.example.ui.theme.StudioBg
-import com.example.ui.theme.StudioDivider
 import com.example.ui.theme.StudioText
 import com.example.ui.theme.StudioTextDim
-import com.example.ui.theme.SurfaceLevel1
-import com.example.ui.theme.SurfaceLevel2
 import java.util.Locale
 
 data class DockCallbacks(
@@ -120,7 +136,7 @@ data class DockCallbacks(
 )
 
 /**
- * Five classic OBS bottom docks in exact OBS Studio order (§9.1, Phase 2 full CRUD & Dock Swap):
+ * 1:1 Classic OBS Studio Dark five-dock layout:
  * Scenes · Sources · Audio Mixer · Scene Transitions · Controls.
  */
 @Composable
@@ -135,18 +151,19 @@ fun ObsBottomDocksRow(
     val expanded = state.expandedDock
 
     val heightDp = when {
-        collapsed -> 40.dp
-        expanded != null -> 360.dp
-        else -> 236.dp
+        collapsed -> 30.dp
+        expanded != null -> 340.dp
+        else -> 212.dp
     }
 
     Row(
         modifier = modifier
             .fillMaxWidth()
             .height(heightDp)
-            .background(SurfaceLevel1)
-            .border(1.dp, StudioDivider),
-        horizontalArrangement = Arrangement.spacedBy(1.dp)
+            .background(ObsWindowBg)
+            .border(1.dp, ObsBorder)
+            .padding(horizontal = 3.dp, vertical = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         if (expanded == null || expanded == DockPanelId.SCENES) {
             ScenesDock(
@@ -155,7 +172,7 @@ fun ObsBottomDocksRow(
                 collapsed = collapsed,
                 isExpanded = expanded == DockPanelId.SCENES,
                 callbacks = callbacks,
-                modifier = Modifier.weight(if (expanded == DockPanelId.SCENES) 1f else 0.17f)
+                modifier = Modifier.weight(if (expanded == DockPanelId.SCENES) 1f else 0.165f)
             )
         }
         if (expanded == null || expanded == DockPanelId.SOURCES) {
@@ -165,34 +182,40 @@ fun ObsBottomDocksRow(
                 collapsed = collapsed,
                 isExpanded = expanded == DockPanelId.SOURCES,
                 callbacks = callbacks,
-                modifier = Modifier.weight(if (expanded == DockPanelId.SOURCES) 1f else 0.24f)
+                modifier = Modifier.weight(if (expanded == DockPanelId.SOURCES) 1f else 0.215f)
             )
         }
         if (expanded == null || expanded == DockPanelId.AUDIO_MIXER) {
             AudioMixerDock(
-                state = state,
+                channels = state.audioChannels,
+                masterMuted = state.masterMuted,
+                speakerMicEchoDetected = state.speakerMicEchoDetected,
                 collapsed = collapsed,
                 isExpanded = expanded == DockPanelId.AUDIO_MIXER,
                 callbacks = callbacks,
-                modifier = Modifier.weight(if (expanded == DockPanelId.AUDIO_MIXER) 1f else 0.27f)
+                modifier = Modifier.weight(if (expanded == DockPanelId.AUDIO_MIXER) 1f else 0.305f)
             )
         }
         if (expanded == null || expanded == DockPanelId.TRANSITIONS) {
             TransitionsDock(
-                state = state,
+                transitionType = state.sceneCollection.transitionType,
+                transitionDurationMs = state.sceneCollection.transitionDurationMs,
+                studioModeEnabled = state.studioModeEnabled,
                 collapsed = collapsed,
                 isExpanded = expanded == DockPanelId.TRANSITIONS,
                 callbacks = callbacks,
-                modifier = Modifier.weight(if (expanded == DockPanelId.TRANSITIONS) 1f else 0.14f)
+                modifier = Modifier.weight(if (expanded == DockPanelId.TRANSITIONS) 1f else 0.145f)
             )
         }
         if (expanded == null || expanded == DockPanelId.CONTROLS) {
             ControlsDock(
-                state = state,
+                sessionPhase = state.sessionPhase,
+                recordingPhase = state.recordingPhase,
+                studioModeEnabled = state.studioModeEnabled,
                 collapsed = collapsed,
                 isExpanded = expanded == DockPanelId.CONTROLS,
                 callbacks = callbacks,
-                modifier = Modifier.weight(if (expanded == DockPanelId.CONTROLS) 1f else 0.18f)
+                modifier = Modifier.weight(if (expanded == DockPanelId.CONTROLS) 1f else 0.17f)
             )
         }
     }
@@ -208,76 +231,67 @@ private fun ScenesDock(
     modifier: Modifier
 ) {
     DockFrame(
-        title = if (state.studioModeEnabled) "Scenes (Preview)" else "Scenes",
+        title = if (state.studioModeEnabled) "Scenes (Prev)" else "Scenes",
         collapsed = collapsed,
         isExpanded = isExpanded,
         onHeaderClick = callbacks.onToggleCollapse,
         onExpandClick = { callbacks.onToggleExpandDock(DockPanelId.SCENES) },
         modifier = modifier
     ) {
-        LazyColumn(
-            modifier = Modifier.weight(1f).fillMaxWidth(),
-            contentPadding = PaddingValues(4.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp)
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .background(ObsWellBg)
+                .border(1.dp, ObsBorder)
         ) {
-            items(state.sceneCollection.scenes, key = { it.id }) { scene ->
-                val selected = scene.id == activeSceneId
-                val isProgram = state.studioModeEnabled && scene.id == state.programSceneId
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .minimumInteractiveComponentSize()
-                        .background(
-                            if (selected) ApertureRed.copy(alpha = 0.45f) else SurfaceLevel2,
-                            RoundedCornerShape(4.dp)
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth(),
+                contentPadding = PaddingValues(2.dp),
+                verticalArrangement = Arrangement.spacedBy(1.dp)
+            ) {
+                items(state.sceneCollection.scenes, key = { it.id }) { scene ->
+                    val selected = scene.id == activeSceneId
+                    val isProgram = state.studioModeEnabled && scene.id == state.programSceneId
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(26.dp)
+                            .background(if (selected) ObsSelectionBlue else Color.Transparent)
+                            .clickable { callbacks.onSelectScene(scene.id) }
+                            .padding(horizontal = 6.dp)
+                            .testTag("scene_item_${scene.id}"),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (isProgram) "● ${scene.name}" else scene.name,
+                            fontSize = 12.sp,
+                            color = if (isProgram && !selected) StatusOk else StudioText,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
                         )
-                        .border(
-                            width = if (selected || isProgram) 1.dp else 0.dp,
-                            color = when {
-                                selected -> ApertureRedHi
-                                isProgram -> StatusOk
-                                else -> StudioDivider
-                            },
-                            shape = RoundedCornerShape(4.dp)
-                        )
-                        .clickable { callbacks.onSelectScene(scene.id) }
-                        .padding(horizontal = 6.dp, vertical = 4.dp)
-                        .testTag("scene_item_${scene.id}"),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = if (isProgram) "● ${scene.name}" else scene.name,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = StudioText,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-                    if (isExpanded && selected) {
-                        IconButton(onClick = { callbacks.onRenameScene(scene.id) }, modifier = Modifier.size(28.dp)) {
-                            Icon(Icons.Default.Edit, contentDescription = "Rename scene", tint = StudioTextDim, modifier = Modifier.size(14.dp))
+                        if (isExpanded && selected) {
+                            IconButton(onClick = { callbacks.onRenameScene(scene.id) }, modifier = Modifier.size(22.dp)) {
+                                Icon(Icons.Default.Edit, contentDescription = "Rename scene", tint = StudioText, modifier = Modifier.size(13.dp))
+                            }
                         }
                     }
                 }
             }
         }
-        DockFooterBar {
-            IconButton(onClick = callbacks.onAddScene, modifier = Modifier.size(32.dp).testTag("add_scene_button")) {
-                Icon(Icons.Default.Add, contentDescription = "Add Scene", tint = StudioText, modifier = Modifier.size(16.dp))
-            }
-            IconButton(onClick = { callbacks.onDuplicateScene(activeSceneId) }, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Default.ContentCopy, contentDescription = "Duplicate Scene", tint = StudioTextDim, modifier = Modifier.size(15.dp))
-            }
-            IconButton(onClick = { callbacks.onMoveScene(activeSceneId, -1) }, modifier = Modifier.size(30.dp)) {
-                Icon(Icons.Default.ArrowUpward, contentDescription = "Move Scene Up", tint = StudioTextDim, modifier = Modifier.size(15.dp))
-            }
-            IconButton(onClick = { callbacks.onMoveScene(activeSceneId, 1) }, modifier = Modifier.size(30.dp)) {
-                Icon(Icons.Default.ArrowDownward, contentDescription = "Move Scene Down", tint = StudioTextDim, modifier = Modifier.size(15.dp))
-            }
-            if (state.sceneCollection.scenes.size > 1) {
-                IconButton(onClick = { callbacks.onDeleteScene(activeSceneId) }, modifier = Modifier.size(30.dp)) {
-                    Icon(Icons.Default.Delete, contentDescription = "Delete Scene", tint = StudioTextDim, modifier = Modifier.size(15.dp))
-                }
+        ObsToolbarRow {
+            ObsSmallToolIcon(Icons.Default.Add, "Add Scene", "add_scene_button", onClick = callbacks.onAddScene)
+            ObsSmallToolIcon(
+                Icons.Default.Remove,
+                "Delete Scene",
+                enabled = state.sceneCollection.scenes.size > 1,
+                onClick = { callbacks.onDeleteScene(activeSceneId) }
+            )
+            ObsSmallToolIcon(Icons.Default.KeyboardArrowUp, "Move Scene Up") { callbacks.onMoveScene(activeSceneId, -1) }
+            ObsSmallToolIcon(Icons.Default.KeyboardArrowDown, "Move Scene Down") { callbacks.onMoveScene(activeSceneId, 1) }
+            if (isExpanded) {
+                ObsSmallToolIcon(Icons.Default.ContentCopy, "Duplicate Scene") { callbacks.onDuplicateScene(activeSceneId) }
             }
         }
     }
@@ -301,116 +315,122 @@ private fun SourcesDock(
         onExpandClick = { callbacks.onToggleExpandDock(DockPanelId.SOURCES) },
         modifier = modifier
     ) {
-        LazyColumn(
-            modifier = Modifier.weight(1f).fillMaxWidth(),
-            contentPadding = PaddingValues(4.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp)
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .background(ObsWellBg)
+                .border(1.dp, ObsBorder)
         ) {
-            items(sources, key = { it.id }) { src ->
-                val selected = src.id == state.selectedSourceId
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(
-                            if (selected) ApertureRed.copy(alpha = 0.35f) else SurfaceLevel2,
-                            RoundedCornerShape(4.dp)
-                        )
-                        .border(
-                            width = if (selected) 1.dp else 0.dp,
-                            color = if (selected) ApertureRedHi else StudioDivider,
-                            shape = RoundedCornerShape(4.dp)
-                        )
-                        .clickable { callbacks.onSelectSource(src.id) }
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                        .testTag("source_item_${src.id}"),
-                    verticalAlignment = Alignment.CenterVertically
+            if (sources.isEmpty()) {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(8.dp).align(Alignment.Center),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = src.name,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (src.erroredReason != null) StatusWarn else StudioText,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        val sub = src.erroredReason ?: src.videoFilters.activeTags().takeIf { it.isNotEmpty() }?.joinToString("·")
-                        if (sub != null) {
+                    Text(
+                        text = "You don't have any sources.\nClick the + button below to add one.",
+                        fontSize = 11.sp,
+                        lineHeight = 14.sp,
+                        color = StudioTextDim,
+                        textAlign = TextAlign.Center
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Icon(Icons.Default.Image, contentDescription = null, tint = StudioText, modifier = Modifier.size(18.dp).clickable { callbacks.onOpenAddSource() })
+                        Icon(Icons.Default.Monitor, contentDescription = null, tint = StudioText, modifier = Modifier.size(18.dp).clickable { callbacks.onOpenAddSource() })
+                        Icon(Icons.Default.Videocam, contentDescription = null, tint = StudioText, modifier = Modifier.size(18.dp).clickable { callbacks.onOpenAddSource() })
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(2.dp),
+                    verticalArrangement = Arrangement.spacedBy(1.dp)
+                ) {
+                    items(sources, key = { it.id }) { src ->
+                        val selected = src.id == state.selectedSourceId
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(26.dp)
+                                .background(if (selected) ObsSelectionBlue else Color.Transparent)
+                                .clickable { callbacks.onSelectSource(src.id) }
+                                .padding(horizontal = 4.dp)
+                                .testTag("source_item_${src.id}"),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                             Text(
-                                text = sub,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (src.erroredReason != null) StatusWarn else StatusOk,
+                                text = src.name,
+                                fontSize = 12.sp,
+                                color = if (src.erroredReason != null) StatusWarn else StudioText,
                                 maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
                             )
+                            if (src.type == SourceType.CAMERA_2) {
+                                IconButton(onClick = { callbacks.onSwitchCamera(src.id) }, modifier = Modifier.size(22.dp)) {
+                                    Icon(Icons.Default.Cameraswitch, contentDescription = "Switch camera", tint = StudioTextDim, modifier = Modifier.size(13.dp))
+                                }
+                            }
+                            if (src.type.isVisual) {
+                                IconButton(
+                                    onClick = { callbacks.onOpenVideoFilters(src) },
+                                    modifier = Modifier.size(22.dp).testTag("video_filter_btn_${src.id}")
+                                ) {
+                                    Icon(
+                                        Icons.Default.AutoFixHigh,
+                                        contentDescription = "Video filters",
+                                        tint = if (src.videoFilters.anyActive()) StatusOk else StudioTextDim,
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                }
+                            }
+                            IconButton(onClick = { callbacks.onToggleSourceVisible(src.id) }, modifier = Modifier.size(22.dp)) {
+                                Icon(
+                                    if (src.visible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                                    contentDescription = "Toggle visibility",
+                                    tint = if (src.visible) StudioText else StudioTextDim,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                            }
+                            IconButton(onClick = { callbacks.onToggleSourceLock(src.id) }, modifier = Modifier.size(22.dp)) {
+                                Icon(
+                                    if (src.locked) Icons.Default.Lock else Icons.Default.LockOpen,
+                                    contentDescription = "Toggle lock",
+                                    tint = if (src.locked) StatusWarn else StudioTextDim,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                            }
                         }
-                    }
-                    if (src.type == SourceType.CAMERA_2) {
-                        IconButton(onClick = { callbacks.onSwitchCamera(src.id) }, modifier = Modifier.size(28.dp)) {
-                            Icon(Icons.Default.Cameraswitch, contentDescription = "Switch camera", tint = StudioTextDim, modifier = Modifier.size(15.dp))
-                        }
-                    }
-                    if (src.type.isVisual) {
-                        IconButton(onClick = { callbacks.onOpenVideoFilters(src) }, modifier = Modifier.size(28.dp).testTag("video_filter_btn_${src.id}")) {
-                            Icon(
-                                Icons.Default.AutoFixHigh,
-                                contentDescription = "Video filters",
-                                tint = if (src.videoFilters.anyActive()) ApertureRedHi else StudioTextDim,
-                                modifier = Modifier.size(15.dp)
-                            )
-                        }
-                    }
-                    IconButton(onClick = { callbacks.onToggleSourceVisible(src.id) }, modifier = Modifier.size(28.dp)) {
-                        Icon(
-                            if (src.visible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
-                            contentDescription = "Toggle visibility",
-                            tint = if (src.visible) StudioText else StudioTextDim,
-                            modifier = Modifier.size(15.dp)
-                        )
-                    }
-                    IconButton(onClick = { callbacks.onToggleSourceLock(src.id) }, modifier = Modifier.size(28.dp)) {
-                        Icon(
-                            if (src.locked) Icons.Default.Lock else Icons.Default.LockOpen,
-                            contentDescription = "Toggle lock",
-                            tint = if (src.locked) StatusWarn else StudioTextDim,
-                            modifier = Modifier.size(15.dp)
-                        )
                     }
                 }
             }
         }
-        DockFooterBar {
-            IconButton(onClick = callbacks.onOpenAddSource, modifier = Modifier.size(32.dp).testTag("add_source_button")) {
-                Icon(Icons.Default.Add, contentDescription = "Add Source", tint = StudioText, modifier = Modifier.size(16.dp))
+        ObsToolbarRow {
+            ObsSmallToolIcon(Icons.Default.Add, "Add Source", "add_source_button", onClick = callbacks.onOpenAddSource)
+            ObsSmallToolIcon(
+                Icons.Default.Remove,
+                "Remove Source",
+                "remove_source_button",
+                enabled = state.selectedSourceId != null,
+                onClick = { state.selectedSourceId?.let(callbacks.onRemoveSource) }
+            )
+            ObsSmallToolIcon(
+                Icons.Default.Settings,
+                "Source Properties",
+                "source_properties_button",
+                onClick = { selectedSrc?.let(callbacks.onOpenSourceProperties) ?: callbacks.onOpenScreenFit() }
+            )
+            ObsSmallToolIcon(Icons.Default.KeyboardArrowUp, "Move Source Up") {
+                state.selectedSourceId?.let { callbacks.onMoveSource(it, -1) }
             }
-            IconButton(
-                onClick = { state.selectedSourceId?.let(callbacks.onRemoveSource) },
-                modifier = Modifier.size(32.dp).testTag("remove_source_button")
-            ) {
-                Icon(Icons.Default.Delete, contentDescription = "Remove Source", tint = StudioTextDim, modifier = Modifier.size(16.dp))
+            ObsSmallToolIcon(Icons.Default.KeyboardArrowDown, "Move Source Down") {
+                state.selectedSourceId?.let { callbacks.onMoveSource(it, 1) }
             }
-            IconButton(
-                onClick = { selectedSrc?.let(callbacks.onOpenSourceProperties) ?: callbacks.onOpenScreenFit() },
-                modifier = Modifier.size(32.dp).testTag("source_properties_button")
-            ) {
-                Icon(Icons.Default.Edit, contentDescription = "Source Properties", tint = StudioText, modifier = Modifier.size(15.dp))
-            }
-            IconButton(
-                onClick = { state.selectedSourceId?.let(callbacks.onDuplicateSource) },
-                modifier = Modifier.size(30.dp)
-            ) {
-                Icon(Icons.Default.ContentCopy, contentDescription = "Duplicate Source", tint = StudioTextDim, modifier = Modifier.size(15.dp))
-            }
-            IconButton(
-                onClick = { state.selectedSourceId?.let { callbacks.onMoveSource(it, -1) } },
-                modifier = Modifier.size(30.dp)
-            ) {
-                Icon(Icons.Default.ArrowUpward, contentDescription = "Move Source Up", tint = StudioTextDim, modifier = Modifier.size(15.dp))
-            }
-            IconButton(
-                onClick = { state.selectedSourceId?.let { callbacks.onMoveSource(it, 1) } },
-                modifier = Modifier.size(30.dp)
-            ) {
-                Icon(Icons.Default.ArrowDownward, contentDescription = "Move Source Down", tint = StudioTextDim, modifier = Modifier.size(15.dp))
+            if (isExpanded) {
+                ObsSmallToolIcon(Icons.Default.ContentCopy, "Duplicate Source") {
+                    state.selectedSourceId?.let(callbacks.onDuplicateSource)
+                }
             }
         }
     }
@@ -418,7 +438,9 @@ private fun SourcesDock(
 
 @Composable
 private fun AudioMixerDock(
-    state: MobileLabsUiState,
+    channels: List<AudioChannelState>,
+    masterMuted: Boolean,
+    speakerMicEchoDetected: Boolean,
     collapsed: Boolean,
     isExpanded: Boolean,
     callbacks: DockCallbacks,
@@ -433,44 +455,53 @@ private fun AudioMixerDock(
         modifier = modifier
     ) {
         Column(
-            modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 6.dp, vertical = 4.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .background(ObsWellBg)
+                .border(1.dp, ObsBorder)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 6.dp, vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp)
         ) {
-            state.audioChannels.forEach { ch ->
-                AudioChannelRow(
+            channels.forEach { ch ->
+                ClassicObsAudioChannelRow(
                     channel = ch,
-                    masterMuted = state.masterMuted,
+                    masterMuted = masterMuted,
                     onVolumeChange = { callbacks.onAudioVolumeChange(ch.id, it) },
                     onToggleMute = { callbacks.onAudioMuteToggle(ch.id) },
-                    onToggleLock = { callbacks.onAudioLockToggle(ch.id) },
                     onOpenFilters = { callbacks.onOpenAudioFilters(ch) }
                 )
             }
-            if (state.speakerMicEchoDetected) {
+            if (speakerMicEchoDetected) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Warning, contentDescription = "Echo warning", tint = StatusWarn, modifier = Modifier.size(14.dp))
+                    Icon(Icons.Default.Warning, contentDescription = "Echo warning", tint = StatusWarn, modifier = Modifier.size(12.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text(
-                        text = "Speaker + mic active: use headphones to avoid echo",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = StatusWarn,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    Text("Use headphones to prevent speaker/mic echo", fontSize = 10.sp, color = StatusWarn, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
         }
-        DockFooterBar {
-            OutlinedButton(
-                onClick = callbacks.onMasterMuteToggle,
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                border = BorderStroke(1.dp, if (state.masterMuted) MeterRed else StudioDivider),
-                modifier = Modifier.height(28.dp).testTag("master_mute_button")
+        ObsToolbarRow {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = if (state.masterMuted) "MASTER MUTED" else "Master: Active",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (state.masterMuted) MeterRed else StudioText
+                    text = if (masterMuted) "MASTER MUTED" else "48 kHz Stereo",
+                    fontSize = 10.sp,
+                    color = if (masterMuted) MeterRed else StudioTextDim
+                )
+                Text(
+                    text = if (masterMuted) "Unmute Master" else "Mute Master",
+                    fontSize = 10.sp,
+                    color = if (masterMuted) MeterRed else StudioText,
+                    modifier = Modifier
+                        .background(ObsControlBtn, RoundedCornerShape(2.dp))
+                        .border(1.dp, ObsBorder, RoundedCornerShape(2.dp))
+                        .clickable { callbacks.onMasterMuteToggle() }
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                        .testTag("master_mute_button")
                 )
             }
         }
@@ -479,12 +510,16 @@ private fun AudioMixerDock(
 
 @Composable
 private fun TransitionsDock(
-    state: MobileLabsUiState,
+    transitionType: TransitionType,
+    transitionDurationMs: Int,
+    studioModeEnabled: Boolean,
     collapsed: Boolean,
     isExpanded: Boolean,
     callbacks: DockCallbacks,
     modifier: Modifier
 ) {
+    var dropdownOpen by remember { mutableStateOf(false) }
+
     DockFrame(
         title = "Scene Transitions",
         collapsed = collapsed,
@@ -494,97 +529,122 @@ private fun TransitionsDock(
         modifier = modifier
     ) {
         Column(
-            modifier = Modifier.fillMaxWidth().padding(6.dp),
-            verticalArrangement = Arrangement.spacedBy(5.dp)
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .background(ObsWindowBg)
+                .padding(horizontal = 4.dp, vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            val entries = TransitionType.entries
-            Row(horizontalArrangement = Arrangement.spacedBy(3.dp), modifier = Modifier.fillMaxWidth()) {
-                entries.take(3).forEach { tType ->
-                    TransitionChip(tType, state, callbacks.onTransitionChange, Modifier.weight(1f))
-                }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(3.dp), modifier = Modifier.fillMaxWidth()) {
-                entries.drop(3).forEach { tType ->
-                    TransitionChip(tType, state, callbacks.onTransitionChange, Modifier.weight(1f))
-                }
-            }
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                OutlinedButton(
-                    onClick = {
-                        callbacks.onTransitionChange(
-                            state.sceneCollection.transitionType,
-                            state.sceneCollection.transitionDurationMs - 50
-                        )
-                    },
-                    contentPadding = PaddingValues(0.dp),
-                    modifier = Modifier.size(28.dp)
-                ) { Text("-", color = StudioText) }
-                Text("${state.sceneCollection.transitionDurationMs} ms", style = MaterialTheme.typography.labelSmall, color = StudioText)
-                OutlinedButton(
-                    onClick = {
-                        callbacks.onTransitionChange(
-                            state.sceneCollection.transitionType,
-                            state.sceneCollection.transitionDurationMs + 50
-                        )
-                    },
-                    contentPadding = PaddingValues(0.dp),
-                    modifier = Modifier.size(28.dp)
-                ) { Text("+", color = StudioText) }
-            }
-            if (state.studioModeEnabled) {
-                Button(
-                    onClick = callbacks.onStudioTake,
-                    colors = ButtonDefaults.buttonColors(containerColor = ApertureRed),
-                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
-                    modifier = Modifier.fillMaxWidth().height(32.dp).testTag("studio_take_button")
+            Box {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(26.dp)
+                        .background(ObsControlBtn, RoundedCornerShape(3.dp))
+                        .border(1.dp, ObsBorder, RoundedCornerShape(3.dp))
+                        .clickable { dropdownOpen = true }
+                        .padding(horizontal = 8.dp)
+                        .testTag("transition_dropdown_button"),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("TAKE → LIVE", style = MaterialTheme.typography.labelSmall, color = StudioText)
+                    Text(transitionType.label, fontSize = 11.sp, color = StudioText, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Icon(Icons.Default.ArrowDropDown, contentDescription = "Transition menu", tint = StudioText, modifier = Modifier.size(16.dp))
+                }
+                DropdownMenu(
+                    expanded = dropdownOpen,
+                    onDismissRequest = { dropdownOpen = false },
+                    modifier = Modifier.background(ObsHeaderBg)
+                ) {
+                    TransitionType.entries.forEach { tType ->
+                        DropdownMenuItem(
+                            text = { Text(tType.label, fontSize = 12.sp, color = StudioText) },
+                            onClick = {
+                                dropdownOpen = false
+                                callbacks.onTransitionChange(tType, transitionDurationMs)
+                            },
+                            modifier = Modifier.testTag("transition_${tType.name.lowercase()}")
+                        )
+                    }
                 }
             }
-        }
-    }
-}
 
-@Composable
-private fun TransitionChip(
-    tType: TransitionType,
-    state: MobileLabsUiState,
-    onTransitionChange: (TransitionType, Int) -> Unit,
-    modifier: Modifier
-) {
-    val active = state.sceneCollection.transitionType == tType
-    Surface(
-        color = if (active) ApertureRed else SurfaceLevel2,
-        shape = RoundedCornerShape(4.dp),
-        border = BorderStroke(1.dp, if (active) ApertureRedHi else StudioDivider),
-        modifier = modifier
-            .height(28.dp)
-            .clickable { onTransitionChange(tType, state.sceneCollection.transitionDurationMs) }
-            .testTag("transition_${tType.name.lowercase()}")
-    ) {
-        Box(contentAlignment = Alignment.Center) {
-            Text(tType.label, style = MaterialTheme.typography.labelSmall, color = StudioText, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                ObsSmallToolIcon(Icons.Default.Add, "Quick Fade") { callbacks.onTransitionChange(TransitionType.FADE, transitionDurationMs) }
+                ObsSmallToolIcon(Icons.Default.Remove, "Quick Cut") { callbacks.onTransitionChange(TransitionType.CUT, transitionDurationMs) }
+                ObsSmallToolIcon(Icons.Default.Settings, "Settings") { callbacks.onOpenSettings() }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Duration", fontSize = 10.sp, color = StudioTextDim, maxLines = 1)
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(24.dp)
+                        .background(ObsWellBg, RoundedCornerShape(2.dp))
+                        .border(1.dp, ObsBorder, RoundedCornerShape(2.dp))
+                        .padding(horizontal = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "−",
+                        fontSize = 12.sp,
+                        color = StudioTextDim,
+                        modifier = Modifier.clickable { callbacks.onTransitionChange(transitionType, transitionDurationMs - 50) }.padding(horizontal = 3.dp)
+                    )
+                    Text("${transitionDurationMs} ms", fontSize = 10.sp, color = StudioText, maxLines = 1)
+                    Text(
+                        text = "+",
+                        fontSize = 12.sp,
+                        color = StudioTextDim,
+                        modifier = Modifier.clickable { callbacks.onTransitionChange(transitionType, transitionDurationMs + 50) }.padding(horizontal = 3.dp)
+                    )
+                }
+            }
+
+            if (studioModeEnabled) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(26.dp)
+                        .background(ApertureRed, RoundedCornerShape(3.dp))
+                        .border(1.dp, ApertureRedHi, RoundedCornerShape(3.dp))
+                        .clickable { callbacks.onStudioTake() }
+                        .testTag("studio_take_button"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("TAKE → LIVE", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = StudioText)
+                }
+            }
         }
     }
 }
 
 @Composable
 private fun ControlsDock(
-    state: MobileLabsUiState,
+    sessionPhase: SessionPhase,
+    recordingPhase: RecordingPhase,
+    studioModeEnabled: Boolean,
     collapsed: Boolean,
     isExpanded: Boolean,
     callbacks: DockCallbacks,
     modifier: Modifier
 ) {
-    val isArmedOrBeyond = state.sessionPhase != SessionPhase.IDLE && state.sessionPhase != SessionPhase.ERROR
-    val isStreamBusy = state.sessionPhase == SessionPhase.LIVE ||
-        state.sessionPhase == SessionPhase.CONNECTING ||
-        state.sessionPhase == SessionPhase.RECONNECTING
-    val isRecording = state.recordingPhase == RecordingPhase.RECORDING
+    val isArmedOrBeyond = sessionPhase != SessionPhase.IDLE && sessionPhase != SessionPhase.ERROR
+    val isStreamBusy = sessionPhase == SessionPhase.LIVE ||
+        sessionPhase == SessionPhase.CONNECTING ||
+        sessionPhase == SessionPhase.RECONNECTING
+    val isRecording = recordingPhase == RecordingPhase.RECORDING
 
     DockFrame(
         title = "Controls",
@@ -595,79 +655,99 @@ private fun ControlsDock(
         modifier = modifier
     ) {
         Column(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 4.dp),
-            verticalArrangement = Arrangement.spacedBy(3.dp)
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 3.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
-            Button(
+            ObsControlButton(
+                label = if (isArmedOrBeyond) "Disarm Capture" else "Arm Capture",
+                dotColor = if (isArmedOrBeyond) StatusOk else ApertureRedHi,
+                bgColor = if (isArmedOrBeyond) ObsControlBtn else ApertureRed.copy(alpha = 0.72f),
+                testTag = "arm_capture_button",
                 onClick = callbacks.onArmOrDisarm,
-                colors = ButtonDefaults.buttonColors(containerColor = if (isArmedOrBeyond) SurfaceLevel2 else ApertureRed, contentColor = StudioText),
-                shape = RoundedCornerShape(4.dp),
-                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
-                modifier = Modifier.fillMaxWidth().height(30.dp).testTag("arm_capture_button")
-            ) {
-                Text(if (isArmedOrBeyond) "Disarm Capture" else "Arm Capture", style = MaterialTheme.typography.labelMedium, maxLines = 1)
-            }
-            Button(
+                modifier = Modifier.weight(1f)
+            )
+            ObsControlButton(
+                label = when (sessionPhase) {
+                    SessionPhase.LIVE -> "Stop Streaming"
+                    SessionPhase.CONNECTING -> "Connecting..."
+                    SessionPhase.RECONNECTING -> "Cancel Reconnect"
+                    else -> "Start Streaming"
+                },
+                enabled = isArmedOrBeyond,
+                bgColor = if (isStreamBusy) ApertureRedHi else ObsControlBtn,
+                testTag = "stream_toggle_button",
                 onClick = callbacks.onToggleStream,
+                modifier = Modifier.weight(1f)
+            )
+            ObsControlButton(
+                label = if (isRecording) "Stop Recording" else "Start Recording",
                 enabled = isArmedOrBeyond,
-                colors = ButtonDefaults.buttonColors(containerColor = if (isStreamBusy) ApertureRedHi else SurfaceLevel2, contentColor = StudioText),
-                shape = RoundedCornerShape(4.dp),
-                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
-                modifier = Modifier.fillMaxWidth().height(30.dp).testTag("stream_toggle_button")
-            ) {
-                Text(
-                    when (state.sessionPhase) {
-                        SessionPhase.LIVE -> "Stop Streaming"
-                        SessionPhase.CONNECTING -> "Connecting..."
-                        SessionPhase.RECONNECTING -> "Cancel Reconnect"
-                        else -> "Start Streaming"
-                    },
-                    style = MaterialTheme.typography.labelMedium,
-                    maxLines = 1
-                )
-            }
-            Button(
+                bgColor = if (isRecording) ApertureRed else ObsControlBtn,
+                testTag = "record_toggle_button",
                 onClick = callbacks.onToggleRecord,
-                enabled = isArmedOrBeyond,
-                colors = ButtonDefaults.buttonColors(containerColor = if (isRecording) ApertureRed else SurfaceLevel2, contentColor = StudioText),
-                shape = RoundedCornerShape(4.dp),
-                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
-                modifier = Modifier.fillMaxWidth().height(30.dp).testTag("record_toggle_button")
-            ) {
-                Text(if (isRecording) "Stop Recording" else "Start Recording", style = MaterialTheme.typography.labelMedium, maxLines = 1)
-            }
-            OutlinedButton(
+                modifier = Modifier.weight(1f)
+            )
+            ObsControlButton(
+                label = if (studioModeEnabled) "Studio Mode: ON" else "Studio Mode",
+                bgColor = if (studioModeEnabled) ObsSelectionBlue else ObsControlBtn,
+                testTag = "studio_mode_toggle_button",
                 onClick = callbacks.onToggleStudioMode,
-                border = BorderStroke(1.dp, if (state.studioModeEnabled) ApertureRedHi else StudioDivider),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    containerColor = if (state.studioModeEnabled) ApertureRed.copy(alpha = 0.35f) else SurfaceLevel2
-                ),
-                shape = RoundedCornerShape(4.dp),
-                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
-                modifier = Modifier.fillMaxWidth().height(28.dp).testTag("studio_mode_toggle_button")
-            ) {
-                Text(if (state.studioModeEnabled) "Studio Mode: ON" else "Studio Mode", style = MaterialTheme.typography.labelSmall, color = StudioText, maxLines = 1)
+                modifier = Modifier.weight(1f)
+            )
+            ObsControlButton(
+                label = "Settings",
+                testTag = "open_settings_button",
+                onClick = callbacks.onOpenSettings,
+                modifier = Modifier.weight(1f)
+            )
+            ObsControlButton(
+                label = "Exit",
+                testTag = "exit_button",
+                onClick = callbacks.onExitApp,
+                modifier = Modifier.weight(1f)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ObsControlButton(
+    label: String,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    dotColor: Color? = null,
+    bgColor: Color = ObsControlBtn,
+    testTag: String = "",
+    onClick: () -> Unit
+) {
+    Surface(
+        color = if (enabled) bgColor else Color(0xFF313138),
+        shape = RoundedCornerShape(3.dp),
+        border = BorderStroke(1.dp, if (enabled) ObsBorder else Color(0xFF393942)),
+        modifier = modifier
+            .fillMaxWidth()
+            .then(if (testTag.isNotEmpty()) Modifier.testTag(testTag) else Modifier)
+            .clickable(enabled = enabled, onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            if (dotColor != null) {
+                Box(modifier = Modifier.size(6.dp).background(dotColor, CircleShape))
+                Spacer(Modifier.width(5.dp))
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
-                OutlinedButton(
-                    onClick = callbacks.onOpenDiagnostics,
-                    shape = RoundedCornerShape(4.dp),
-                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
-                    modifier = Modifier.weight(1f).height(28.dp).testTag("open_diagnostics_button")
-                ) { Text("Probes", style = MaterialTheme.typography.labelSmall, color = StudioText, maxLines = 1) }
-                OutlinedButton(
-                    onClick = callbacks.onOpenSettings,
-                    shape = RoundedCornerShape(4.dp),
-                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
-                    modifier = Modifier.weight(1f).height(28.dp).testTag("open_settings_button")
-                ) { Text("Settings", style = MaterialTheme.typography.labelSmall, color = StudioText, maxLines = 1) }
-                OutlinedButton(
-                    onClick = callbacks.onExitApp,
-                    shape = RoundedCornerShape(4.dp),
-                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
-                    modifier = Modifier.weight(0.7f).height(28.dp).testTag("exit_button")
-                ) { Text("Exit", style = MaterialTheme.typography.labelSmall, color = StudioTextDim, maxLines = 1) }
-            }
+            Text(
+                text = label,
+                fontSize = 11.sp,
+                color = if (enabled) StudioText else StudioTextDim.copy(alpha = 0.55f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
     }
 }
@@ -685,14 +765,14 @@ private fun DockFrame(
     Column(
         modifier = modifier
             .fillMaxHeight()
-            .background(SurfaceLevel1)
-            .border(0.5.dp, StudioDivider)
+            .background(ObsWindowBg)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(28.dp)
-                .background(SurfaceLevel2)
+                .height(24.dp)
+                .background(ObsHeaderBg)
+                .border(0.5.dp, ObsBorder)
                 .clickable { onHeaderClick() }
                 .padding(horizontal = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -700,26 +780,21 @@ private fun DockFrame(
         ) {
             Text(
                 text = title,
-                style = MaterialTheme.typography.titleSmall,
+                fontSize = 11.sp,
                 color = StudioText,
-                fontWeight = FontWeight.SemiBold,
+                fontWeight = FontWeight.Medium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
-            IconButton(onClick = onExpandClick, modifier = Modifier.size(24.dp)) {
+            IconButton(onClick = onExpandClick, modifier = Modifier.size(20.dp)) {
                 Icon(
                     if (isExpanded) Icons.Default.CloseFullscreen else Icons.Default.OpenInFull,
                     contentDescription = "Expand $title dock",
                     tint = StudioTextDim,
-                    modifier = Modifier.size(13.dp)
+                    modifier = Modifier.size(12.dp)
                 )
             }
-            Text(
-                text = if (collapsed) "▲" else "▼",
-                style = MaterialTheme.typography.labelSmall,
-                color = StudioTextDim
-            )
         }
         if (!collapsed) {
             content()
@@ -728,14 +803,13 @@ private fun DockFrame(
 }
 
 @Composable
-private fun DockFooterBar(content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit) {
+private fun ObsToolbarRow(content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(34.dp)
-            .background(StudioBg)
-            .border(0.5.dp, StudioDivider)
-            .padding(horizontal = 4.dp),
+            .height(26.dp)
+            .background(ObsWindowBg)
+            .padding(horizontal = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Start,
         content = content
@@ -743,20 +817,41 @@ private fun DockFooterBar(content: @Composable androidx.compose.foundation.layou
 }
 
 @Composable
-private fun AudioChannelRow(
+private fun ObsSmallToolIcon(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    description: String,
+    testTag: String = "",
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    IconButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier
+            .size(24.dp)
+            .then(if (testTag.isNotEmpty()) Modifier.testTag(testTag) else Modifier)
+    ) {
+        Icon(
+            icon,
+            contentDescription = description,
+            tint = if (enabled) StudioText else StudioTextDim.copy(alpha = 0.4f),
+            modifier = Modifier.size(14.dp)
+        )
+    }
+}
+
+@Composable
+private fun ClassicObsAudioChannelRow(
     channel: AudioChannelState,
     masterMuted: Boolean,
     onVolumeChange: (Float) -> Unit,
     onToggleMute: () -> Unit,
-    onToggleLock: () -> Unit,
     onOpenFilters: () -> Unit
 ) {
     val dbFormatted = String.format(Locale.US, "%.1f dB", channel.peakDb)
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(SurfaceLevel2, RoundedCornerShape(4.dp))
-            .padding(horizontal = 6.dp, vertical = 3.dp)
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(2.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -764,8 +859,8 @@ private fun AudioChannelRow(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                text = "${channel.label} · ${channel.activeRouteLabel}",
-                style = MaterialTheme.typography.labelSmall,
+                text = channel.label,
+                fontSize = 11.sp,
                 color = StudioText,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -773,32 +868,18 @@ private fun AudioChannelRow(
             )
             Text(
                 text = if (channel.isClipping) "CLIP" else dbFormatted,
-                style = MaterialTheme.typography.labelSmall,
+                fontSize = 10.sp,
                 color = if (channel.isClipping) MeterRed else StudioTextDim
             )
         }
-        if (channel.unavailableReason != null) {
-            Text(
-                text = channel.unavailableReason,
-                style = MaterialTheme.typography.labelSmall,
-                color = StatusWarn,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        } else if (channel.filters.anyActive()) {
-            Text(
-                text = "${channel.filters.activeSummary()} (${channel.measuredDspMicros} µs)",
-                style = MaterialTheme.typography.labelSmall,
-                color = StatusOk,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-        ObsSegmentedMeter(
+        ObsSegmentedMeterWithDbScale(
             peakDb = if (channel.muted || masterMuted) -60f else channel.peakDb,
-            modifier = Modifier.fillMaxWidth().height(7.dp).padding(vertical = 1.dp)
+            modifier = Modifier.fillMaxWidth().height(17.dp)
         )
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier.fillMaxWidth().height(22.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Slider(
                 value = channel.volume,
                 onValueChange = { if (!channel.locked) onVolumeChange(it) },
@@ -806,60 +887,71 @@ private fun AudioChannelRow(
                 enabled = !channel.locked,
                 colors = SliderDefaults.colors(
                     thumbColor = StudioText,
-                    activeTrackColor = ApertureRedHi,
-                    inactiveTrackColor = MeterTrack
+                    activeTrackColor = ObsSliderBlue,
+                    inactiveTrackColor = Color(0xFF42424C)
                 ),
-                modifier = Modifier.weight(1f).height(24.dp)
+                modifier = Modifier.weight(1f).height(20.dp)
             )
-            IconButton(
-                onClick = onOpenFilters,
-                modifier = Modifier.size(28.dp).testTag("audio_filter_btn_${channel.id}")
-            ) {
-                Icon(
-                    Icons.Default.Tune,
-                    contentDescription = "Audio filters for ${channel.label}",
-                    tint = if (channel.filters.anyActive()) ApertureRedHi else StudioTextDim,
-                    modifier = Modifier.size(15.dp)
-                )
-            }
-            IconButton(onClick = onToggleMute, modifier = Modifier.size(28.dp)) {
+            IconButton(onClick = onToggleMute, modifier = Modifier.size(24.dp)) {
                 Icon(
                     if (channel.muted || masterMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
                     contentDescription = "Mute ${channel.label}",
                     tint = if (channel.muted || masterMuted) MeterRed else StudioText,
-                    modifier = Modifier.size(16.dp)
-                )
-            }
-            IconButton(onClick = onToggleLock, modifier = Modifier.size(28.dp)) {
-                Icon(
-                    if (channel.locked) Icons.Default.Lock else Icons.Default.LockOpen,
-                    contentDescription = "Lock ${channel.label} fader",
-                    tint = if (channel.locked) StatusWarn else StudioTextDim,
                     modifier = Modifier.size(15.dp)
                 )
             }
+            IconButton(
+                onClick = onOpenFilters,
+                modifier = Modifier.size(24.dp).testTag("audio_filter_btn_${channel.id}")
+            ) {
+                Icon(
+                    Icons.Default.Settings,
+                    contentDescription = "Audio filters for ${channel.label}",
+                    tint = if (channel.filters.anyActive()) StatusOk else StudioText,
+                    modifier = Modifier.size(14.dp)
+                )
+            }
+        }
+        if (channel.unavailableReason != null) {
+            Text(channel.unavailableReason, fontSize = 9.sp, color = StatusWarn, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
 
 @Composable
-private fun ObsSegmentedMeter(peakDb: Float, modifier: Modifier = Modifier) {
+private fun ObsSegmentedMeterWithDbScale(peakDb: Float, modifier: Modifier = Modifier) {
     val norm = ((peakDb + 60f) / 60f).coerceIn(0f, 1f)
-    Canvas(modifier = modifier.background(MeterTrack)) {
-        val w = size.width
-        val h = size.height
-        val activeW = w * norm
-        val greenEnd = w * 0.72f
-        val yellowEnd = w * 0.90f
+    Column(modifier = modifier) {
+        Canvas(modifier = Modifier.fillMaxWidth().height(6.dp).background(MeterTrack)) {
+            val w = size.width
+            val h = size.height
+            val activeW = w * norm
+            val greenEnd = w * 0.68f
+            val yellowEnd = w * 0.86f
 
-        if (activeW > 0f) {
-            drawRect(color = MeterGreen, topLeft = Offset.Zero, size = Size(minOf(activeW, greenEnd), h))
+            // Background faint zone guide
+            drawRect(color = MeterGreen.copy(alpha = 0.14f), topLeft = Offset.Zero, size = Size(greenEnd, h))
+            drawRect(color = MeterYellow.copy(alpha = 0.14f), topLeft = Offset(greenEnd, 0f), size = Size(yellowEnd - greenEnd, h))
+            drawRect(color = MeterRed.copy(alpha = 0.14f), topLeft = Offset(yellowEnd, 0f), size = Size(w - yellowEnd, h))
+
+            if (activeW > 0f) {
+                drawRect(color = MeterGreen, topLeft = Offset.Zero, size = Size(minOf(activeW, greenEnd), h))
+            }
+            if (activeW > greenEnd) {
+                drawRect(color = MeterYellow, topLeft = Offset(greenEnd, 0f), size = Size(minOf(activeW, yellowEnd) - greenEnd, h))
+            }
+            if (activeW > yellowEnd) {
+                drawRect(color = MeterRed, topLeft = Offset(yellowEnd, 0f), size = Size(activeW - yellowEnd, h))
+            }
         }
-        if (activeW > greenEnd) {
-            drawRect(color = MeterYellow, topLeft = Offset(greenEnd, 0f), size = Size(minOf(activeW, yellowEnd) - greenEnd, h))
-        }
-        if (activeW > yellowEnd) {
-            drawRect(color = MeterRed, topLeft = Offset(yellowEnd, 0f), size = Size(activeW - yellowEnd, h))
+        // Classic OBS dB scale tick marks (-60 -50 -40 -30 -20 -15 -10 -5 0)
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 1.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            listOf("-60", "-50", "-40", "-30", "-20", "-15", "-10", "-5", "0").forEach { tick ->
+                Text(text = tick, fontSize = 7.sp, lineHeight = 8.sp, color = StudioTextDim)
+            }
         }
     }
 }

@@ -19,6 +19,7 @@ import android.provider.Settings
 import android.view.Surface
 import androidx.core.content.ContextCompat
 import com.example.mobilelabs.diagnostics.DiagnosticsExporter
+import com.example.mobilelabs.diagnostics.LocalCrashHandler
 import com.example.mobilelabs.media.AudioCaptureMixer
 import com.example.mobilelabs.media.Camera2SourceController
 import com.example.mobilelabs.media.GlZeroCopyCompositor
@@ -26,7 +27,11 @@ import com.example.mobilelabs.media.HardwareMediaPipeline
 import com.example.mobilelabs.model.AppProfile
 import com.example.mobilelabs.model.AudioChannelState
 import com.example.mobilelabs.model.AudioFilterConfig
+import com.example.mobilelabs.model.AutoTuneResult
+import com.example.mobilelabs.model.BenchmarkRecord
 import com.example.mobilelabs.model.DockPanelId
+import com.example.mobilelabs.model.DualDestinationState
+import com.example.mobilelabs.model.GamingScenePreset
 import com.example.mobilelabs.model.MobileLabsUiState
 import com.example.mobilelabs.model.PresetId
 import com.example.mobilelabs.model.PreviewTool
@@ -46,6 +51,7 @@ import com.example.mobilelabs.model.VideoFilterConfig
 import com.example.mobilelabs.persistence.ObsJsonImporterExporter
 import com.example.mobilelabs.persistence.SceneCollectionRepository
 import com.example.mobilelabs.probes.DeviceAndCodecProbe
+import com.example.mobilelabs.probes.SamsungOneUiAdvisor
 import com.example.mobilelabs.security.KeystoreSecretStore
 import com.example.mobilelabs.service.CaptureForegroundService
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -59,9 +65,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import javax.net.ssl.SSLSocketFactory
 
 /**
  * Single owner of state for Mobile Labs (Iron Rule R10).
@@ -82,6 +91,7 @@ class SessionController(private val context: Context) {
     private val obsBridge = ObsEngineBridge(context)
     private val diagnosticsExporter = DiagnosticsExporter(context)
     private val compositor = GlZeroCopyCompositor()
+    private val adaptiveEngine = AdaptiveQualityEngine()
 
     private val _uiState = MutableStateFlow(MobileLabsUiState())
     val uiState: StateFlow<MobileLabsUiState> = _uiState.asStateFlow()
@@ -134,7 +144,10 @@ class SessionController(private val context: Context) {
         overlayPortraitPos = loadedSettings.overlayPortraitX to loadedSettings.overlayPortraitY
 
         val incomplete = repository.detectIncompleteRecordings()
+        val lastCrash = LocalCrashHandler(context).consumeLastCrashSummary()
+        val samsungStatus = SamsungOneUiAdvisor.inspect(context)
         obsBridge.startup(loadedSettings.videoConfig)
+        val initialAdaptive = adaptiveEngine.setLockedByUser(loadedSettings.adaptiveQualityLocked)
 
         _uiState.update { cur ->
             val hydratedChannels = cur.audioChannels.map { ch ->
@@ -158,6 +171,12 @@ class SessionController(private val context: Context) {
                 audioChannels = hydratedChannels,
                 floatingOverlayEnabled = loadedSettings.floatingOverlayEnabled,
                 incompleteRecordings = incomplete,
+                adaptiveQuality = initialAdaptive,
+                samsungStatus = samsungStatus,
+                onboardingCompleted = loadedSettings.onboardingCompleted,
+                lastCrashSummary = lastCrash,
+                benchmarkRecords = loadedSettings.benchmarkRecords,
+                dualDestination = cur.dualDestination.copy(enabled = loadedSettings.dualDestinationEnabled),
                 telemetry = cur.telemetry.copy(
                     outputWidth = loadedSettings.videoConfig.outputWidth,
                     outputHeight = loadedSettings.videoConfig.outputHeight,
@@ -177,6 +196,14 @@ class SessionController(private val context: Context) {
             } ?: RtmpServicePreset.CUSTOM
             val hasKey = runCatching { secretStore.hasStreamKey() }.getOrDefault(false)
             val masked = runCatching { secretStore.getMaskedPreview() }.getOrDefault("Not set")
+
+            val secUrl = runCatching { secretStore.loadSecondaryServerUrl() }.getOrDefault("")
+            val secPreset = runCatching { secretStore.loadSecondaryPresetName() }.getOrNull()?.let { name ->
+                runCatching { RtmpServicePreset.valueOf(name) }.getOrNull()
+            } ?: RtmpServicePreset.TWITCH
+            val secHasKey = runCatching { secretStore.hasSecondaryStreamKey() }.getOrDefault(false)
+            val secMasked = runCatching { secretStore.getSecondaryMaskedPreview() }.getOrDefault("Not set")
+
             val report = runCatching { probeTool.runProbe(testConcurrency = false) }.getOrNull()
 
             _uiState.update { cur ->
@@ -185,12 +212,21 @@ class SessionController(private val context: Context) {
                     rtmpServerUrl = savedUrl.ifBlank { savedPreset.defaultUrl },
                     hasStreamKeySaved = hasKey,
                     maskedStreamKeyPreview = masked,
+                    dualDestination = cur.dualDestination.copy(
+                        preset = secPreset,
+                        serverUrl = secUrl.ifBlank { secPreset.defaultUrl },
+                        hasKeySaved = secHasKey,
+                        maskedKeyPreview = secMasked
+                    ),
                     deviceReport = report
                 )
             }
         }
 
         startTelemetryLoop()
+        if (lastCrash != null) {
+            logEvent("Previous crash detected: $lastCrash")
+        }
         logEvent("SessionController initialized (${obsBridge.backendStatus.label})")
     }
 
@@ -373,6 +409,58 @@ class SessionController(private val context: Context) {
                 )
             }
             pipeline?.startStreaming(url, key, st.videoConfig)
+
+            // M3.4 Dual Destination (shares single HW H.264/AAC encode; failures isolated)
+            if (st.dualDestination.enabled) {
+                val secUrl = secretStore.loadSecondaryServerUrl().ifBlank { st.dualDestination.serverUrl }
+                val secKey = secretStore.loadSecondaryStreamKey()
+                if (secUrl.isNotBlank() && secKey.isNotBlank()) {
+                    _uiState.update { cur ->
+                        cur.copy(
+                            dualDestination = cur.dualDestination.copy(
+                                phase = SessionPhase.CONNECTING,
+                                errorReason = null
+                            )
+                        )
+                    }
+                    pipeline?.startSecondaryStreaming(
+                        rtmpBaseUrl = secUrl,
+                        streamKey = secKey,
+                        videoConfig = st.videoConfig,
+                        onConnected = {
+                            _uiState.update { cur ->
+                                cur.copy(
+                                    dualDestination = cur.dualDestination.copy(
+                                        phase = SessionPhase.LIVE,
+                                        errorReason = null
+                                    )
+                                )
+                            }
+                            logEvent("Secondary RTMP destination LIVE")
+                        },
+                        onError = { err ->
+                            _uiState.update { cur ->
+                                cur.copy(
+                                    dualDestination = cur.dualDestination.copy(
+                                        phase = SessionPhase.ERROR,
+                                        errorReason = KeystoreSecretStore.redactUrlAndKeys(err, secKey)
+                                    )
+                                )
+                            }
+                            logEvent("Secondary RTMP warning (primary unaffected): ${KeystoreSecretStore.redactUrlAndKeys(err, secKey)}")
+                        }
+                    )
+                } else {
+                    _uiState.update { cur ->
+                        cur.copy(
+                            dualDestination = cur.dualDestination.copy(
+                                phase = SessionPhase.ERROR,
+                                errorReason = "Secondary URL/Key missing"
+                            )
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -380,12 +468,15 @@ class SessionController(private val context: Context) {
         reconnectJob?.cancel()
         reconnectJob = null
         pipeline?.stopStreaming()
+        pipeline?.stopSecondaryStreaming()
+        compositor.setHeavyFiltersSuspended(false)
         _uiState.update { cur ->
             val nextPhase = if (cur.sessionPhase == SessionPhase.IDLE) SessionPhase.IDLE else SessionPhase.ARMED
             cur.copy(
                 sessionPhase = nextPhase,
                 reconnectCountdownSec = 0,
                 unlockLiveTouchOverride = false,
+                dualDestination = cur.dualDestination.copy(phase = SessionPhase.IDLE, errorReason = null, bufferedBytes = 0L),
                 statusMessage = if (nextPhase == SessionPhase.ARMED) "Stream stopped · Capture still armed" else "Stopped"
             )
         }
@@ -544,6 +635,40 @@ class SessionController(private val context: Context) {
         }
     }
 
+    fun saveSecondaryStreamCredentials(
+        enabled: Boolean,
+        preset: RtmpServicePreset,
+        serverUrl: String,
+        newStreamKey: String?
+    ) {
+        scope.launch(Dispatchers.IO) {
+            secretStore.saveSecondaryStreamConfig(preset.name, serverUrl, newStreamKey)
+            val hasKey = secretStore.hasSecondaryStreamKey()
+            val masked = secretStore.getSecondaryMaskedPreview()
+            _uiState.update { cur ->
+                cur.copy(
+                    dualDestination = cur.dualDestination.copy(
+                        enabled = enabled,
+                        preset = preset,
+                        serverUrl = serverUrl.trim(),
+                        hasKeySaved = hasKey,
+                        maskedKeyPreview = masked
+                    ),
+                    statusMessage = if (enabled) "Dual RTMP destination saved (shared HW encode)" else "Dual RTMP disabled"
+                )
+            }
+            persistCurrentSettings()
+            logEvent("Secondary stream destination updated (enabled=$enabled, preset=${preset.label})")
+        }
+    }
+
+    fun setDualDestinationEnabled(enabled: Boolean) {
+        _uiState.update { cur ->
+            cur.copy(dualDestination = cur.dualDestination.copy(enabled = enabled))
+        }
+        persistCurrentSettings()
+    }
+
     fun setCustomRecordingFolderUri(uri: String?) {
         _uiState.update {
             it.copy(
@@ -593,7 +718,8 @@ class SessionController(private val context: Context) {
     fun exportDiagnosticsZip() {
         scope.launch(Dispatchers.IO) {
             val key = secretStore.loadStreamKey()
-            val path = diagnosticsExporter.exportRedactedZip(_uiState.value, key)
+            val secKey = secretStore.loadSecondaryStreamKey()
+            val path = diagnosticsExporter.exportRedactedZip(_uiState.value, key, secKey)
             _uiState.update {
                 it.copy(
                     lastDiagnosticsExportPath = path,
@@ -602,6 +728,183 @@ class SessionController(private val context: Context) {
             }
             logEvent("Diagnostics exported to ${path ?: "failed"}")
         }
+    }
+
+    // Phase 3: Adaptive Quality, Gaming Presets, Samsung Advisor, Auto-Tune, Benchmark Kit, Onboarding
+    fun setAdaptiveQualityLocked(locked: Boolean) {
+        val next = adaptiveEngine.setLockedByUser(locked)
+        _uiState.update { it.copy(adaptiveQuality = next) }
+        persistCurrentSettings()
+        logEvent(if (locked) "Adaptive quality LOCKED by user" else "Adaptive quality unlocked")
+    }
+
+    fun resetAdaptiveQuality() {
+        compositor.setHeavyFiltersSuspended(false)
+        val next = adaptiveEngine.resetToNormal("Reset manually by user")
+        _uiState.update { it.copy(adaptiveQuality = next) }
+        logEvent("Adaptive quality reset to L0")
+    }
+
+    fun applyGamingScenePreset(preset: GamingScenePreset) {
+        pushUndo()
+        val newScenes = GamingScenePresets.buildScenesForPreset(preset)
+        val col = _uiState.value.sceneCollection
+        val updated = if (preset == GamingScenePreset.INTERMISSION_PACK) {
+            col.copy(scenes = col.scenes + newScenes, activeSceneId = newScenes.first().id)
+        } else {
+            val replaced = col.scenes.filterNot { ns -> newScenes.any { it.name == ns.name } } + newScenes
+            col.copy(scenes = replaced, activeSceneId = newScenes.first().id)
+        }
+        val selId = newScenes.first().sources.firstOrNull()?.id
+        _uiState.update {
+            it.copy(
+                sceneCollection = updated,
+                previewSceneId = updated.activeSceneId,
+                programSceneId = if (it.studioModeEnabled) it.programSceneId else updated.activeSceneId,
+                selectedSourceId = selId,
+                statusMessage = "Applied Gaming Preset: ${preset.label}"
+            )
+        }
+        repository.saveSceneCollectionAtomic(updated)
+        syncCompositorScenes()
+        syncActiveCameraSource()
+        logEvent("Applied Gaming Scene Preset: ${preset.label}")
+    }
+
+    fun refreshSamsungAdvisor() {
+        val status = SamsungOneUiAdvisor.inspect(context)
+        _uiState.update { it.copy(samsungStatus = status) }
+    }
+
+    fun runAutoTuneProbe(applyRecommended: Boolean = true) {
+        scope.launch(Dispatchers.IO) {
+            val report = probeTool.runProbe(testConcurrency = true)
+            val hwAvcCount = report.encoders.count { it.isHardwareAccelerated && it.mimeType == "video/avc" }
+            val supports1080p60 = report.encoders.any { it.isHardwareAccelerated && it.supportsSurfaceInput && it.supports1080p60 }
+            val supports720p60 = report.encoders.any { it.isHardwareAccelerated && it.supportsSurfaceInput && it.supports720p60 }
+            val headroom = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                runCatching { powerManager.getThermalHeadroom(10) }.getOrDefault(-1f)
+            } else -1f
+
+            val recommended = when {
+                report.totalRamMb < 4800L || !supports720p60 || headroom >= 0.85f -> PresetId.LOW_OVERHEAD
+                else -> PresetId.BALANCED
+            }
+            val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
+            val summary = "Found $hwAvcCount HW AVC encoders · RAM ${report.totalRamMb} MB · Thermal headroom ${
+                if (headroom >= 0f) String.format(Locale.US, "%.2f", headroom) else "UNMEASURED"
+            } · Recommended: ${recommended.title}"
+
+            val tune = AutoTuneResult(
+                completedAtIso = stamp,
+                recommendedPreset = recommended,
+                hwAvcEncodersFound = hwAvcCount,
+                supports1080p60 = supports1080p60,
+                ramMb = report.totalRamMb,
+                thermalHeadroom = headroom,
+                summary = summary
+            )
+            _uiState.update { cur ->
+                cur.copy(
+                    deviceReport = report,
+                    autoTuneResult = tune,
+                    statusMessage = "Auto-Tune complete: ${recommended.title}"
+                )
+            }
+            if (applyRecommended) {
+                scope.launch(Dispatchers.Main.immediate) {
+                    applyPreset(recommended)
+                }
+            }
+            logEvent("Auto-Tune Wizard completed: $summary")
+        }
+    }
+
+    fun testRtmpReachability(url: String, onResult: (Boolean, String) -> Unit) {
+        scope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                val trimmed = url.trim()
+                val isTls = trimmed.startsWith("rtmps://", ignoreCase = true)
+                val clean = trimmed.removePrefix("rtmps://").removePrefix("rtmp://")
+                val hostPort = clean.substringBefore('/')
+                val host = hostPort.substringBefore(':').ifBlank { error("Invalid host") }
+                val port = hostPort.substringAfter(':', "").toIntOrNull() ?: if (isTls) 443 else 1935
+
+                val startMs = System.currentTimeMillis()
+                val sock = if (isTls) SSLSocketFactory.getDefault().createSocket() else Socket()
+                sock.use { s ->
+                    s.connect(InetSocketAddress(host, port), 4000)
+                    s.soTimeout = 4000
+                    val out = s.getOutputStream()
+                    out.write(0x03)
+                    out.write(ByteArray(1536))
+                    out.flush()
+                    val s0 = s.getInputStream().read()
+                    val rtt = System.currentTimeMillis() - startMs
+                    if (s0 == 0x03) {
+                        true to "RTMP handshake OK (${rtt} ms to $host:$port)"
+                    } else {
+                        false to "Connected to $host:$port (${rtt} ms), unexpected S0=$s0"
+                    }
+                }
+            }.getOrElse { err ->
+                false to "Unreachable: ${err.message ?: "connection refused"}"
+            }
+            scope.launch(Dispatchers.Main.immediate) {
+                onResult(result.first, result.second)
+            }
+        }
+    }
+
+    fun completeOnboarding() {
+        _uiState.update { it.copy(onboardingCompleted = true) }
+        persistCurrentSettings()
+    }
+
+    fun dismissCrashBanner() {
+        _uiState.update { it.copy(lastCrashSummary = null) }
+    }
+
+    fun addBenchmarkRecord(
+        appName: String,
+        gameName: String,
+        avgFps: Float,
+        onePercentLowFps: Float,
+        notes: String
+    ) {
+        val st = _uiState.value
+        val dropTotal = st.telemetry.renderSkippedFrames + st.telemetry.encoderDroppedFrames + st.telemetry.networkDroppedFrames
+        val estPct = if (st.telemetry.streamDurationSec > 0 && st.videoConfig.fps > 0) {
+            ((dropTotal.toFloat() / (st.telemetry.streamDurationSec * st.videoConfig.fps).coerceAtLeast(1)) * 100f)
+        } else 0f
+        val rec = BenchmarkRecord(
+            id = "bench_${System.currentTimeMillis()}",
+            appName = appName.ifBlank { "Mobile Labs" },
+            presetLabel = "${st.videoConfig.outputWidth}x${st.videoConfig.outputHeight}@${st.videoConfig.fps}",
+            gameName = gameName.ifBlank { "Geometry Dash" },
+            gameAvgFps = avgFps,
+            gameOnePercentLowFps = onePercentLowFps,
+            streamDroppedPct = estPct,
+            peakThermalLabel = st.telemetry.thermal.statusLabel,
+            processPssMb = st.telemetry.processPssMb,
+            notes = notes,
+            recordedAtIso = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
+        )
+        _uiState.update { cur ->
+            cur.copy(
+                benchmarkRecords = (listOf(rec) + cur.benchmarkRecords).take(30),
+                statusMessage = "Recorded benchmark run for ${rec.appName} (${rec.gameName})"
+            )
+        }
+        persistCurrentSettings()
+        logEvent("Benchmark logged: ${rec.appName} · ${rec.gameName} (${rec.gameAvgFps} fps)")
+    }
+
+    fun deleteBenchmarkRecord(id: String) {
+        _uiState.update { cur ->
+            cur.copy(benchmarkRecords = cur.benchmarkRecords.filterNot { it.id == id })
+        }
+        persistCurrentSettings()
     }
 
     fun toggleHudExpanded() {
@@ -1494,9 +1797,44 @@ class SessionController(private val context: Context) {
             recordingBytesWritten = pipe?.getRecordingBytesWritten() ?: 0L
         )
 
-        val updatedState = cur.copy(
+        val isActiveOutput = cur.sessionPhase == SessionPhase.LIVE || cur.recordingPhase == RecordingPhase.RECORDING
+        val interimSnapshot = snapshot.copy(thermal = cur.telemetry.thermal)
+        val adaptiveOutcome = adaptiveEngine.evaluate(interimSnapshot, isActiveOutput)
+        compositor.setHeavyFiltersSuspended(adaptiveOutcome.shouldSuspendFilters)
+
+        if (adaptiveOutcome.levelChanged) {
+            logEvent("Adaptive Quality -> ${adaptiveOutcome.state.level.shortTag}: ${adaptiveOutcome.state.lastChangeReason}")
+            val scaledBitrate = (cur.videoConfig.videoBitrateKbps * adaptiveOutcome.recommendedBitrateScale).toInt().coerceAtLeast(1500)
+            if (adaptiveOutcome.recommendedBitrateScale > 0f && adaptiveOutcome.recommendedBitrateScale < 1f) {
+                pipe?.updateLiveBitrate(scaledBitrate)
+            } else if (adaptiveOutcome.recommendedBitrateScale == 1f) {
+                pipe?.updateLiveBitrate(cur.videoConfig.videoBitrateKbps)
+            }
+            if (adaptiveOutcome.shouldSwitchLowOverhead && cur.videoConfig.presetId != PresetId.LOW_OVERHEAD) {
+                applyPreset(PresetId.LOW_OVERHEAD)
+            }
+            if (adaptiveOutcome.shouldDropCamera) {
+                cameraController?.stop()
+            }
+            if (adaptiveOutcome.shouldEmergencyStopStream && cur.sessionPhase == SessionPhase.LIVE) {
+                logEvent("CRITICAL THERMAL (L5): Finalizing recording & stopping stream for safety")
+                stopStreaming()
+                if (cur.recordingPhase == RecordingPhase.RECORDING) {
+                    stopRecording()
+                }
+            }
+        }
+
+        val updatedDual = cur.dualDestination.copy(
+            bufferedBytes = pipe?.getSecondaryBufferedBytes() ?: 0L,
+            droppedFrames = pipe?.getSecondaryDroppedFrames() ?: 0L
+        )
+
+        val updatedState = _uiState.value.copy(
             telemetry = snapshot,
             audioChannels = liveChannels,
+            adaptiveQuality = adaptiveOutcome.state,
+            dualDestination = updatedDual,
             speakerMicEchoDetected = mixer?.isSpeakerMicFeedbackRisk() == true
         )
         _uiState.value = updatedState
@@ -1531,7 +1869,11 @@ class SessionController(private val context: Context) {
                 audioFilters = filterMap,
                 profiles = updatedProfiles,
                 activeProfileId = cur.activeProfileId,
-                savedCollections = cur.savedCollectionNames
+                savedCollections = cur.savedCollectionNames,
+                adaptiveQualityLocked = cur.adaptiveQuality.lockedByUser,
+                onboardingCompleted = cur.onboardingCompleted,
+                dualDestinationEnabled = cur.dualDestination.enabled,
+                benchmarkRecords = cur.benchmarkRecords
             )
         )
     }

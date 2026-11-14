@@ -58,7 +58,11 @@ class SceneCollectionRepository(private val context: Context) {
         val audioFilters: Map<String, AudioFilterConfig> = emptyMap(),
         val profiles: List<AppProfile> = listOf(AppProfile()),
         val activeProfileId: String = "prof_default",
-        val savedCollections: List<String> = listOf("Tab A9+ Gaming")
+        val savedCollections: List<String> = listOf("Tab A9+ Gaming"),
+        val adaptiveQualityLocked: Boolean = false,
+        val onboardingCompleted: Boolean = false,
+        val dualDestinationEnabled: Boolean = false,
+        val benchmarkRecords: List<com.example.mobilelabs.model.BenchmarkRecord> = emptyList()
     )
 
     fun saveSceneCollectionAtomic(collection: SceneCollection) {
@@ -286,6 +290,26 @@ class SceneCollectionRepository(private val context: Context) {
             put("swapPreviewProgramOnTake", settings.swapPreviewProgramOnTake)
             put("lockPreviewTouchWhileLive", settings.lockPreviewTouchWhileLive)
             put("activeProfileId", settings.activeProfileId)
+            put("adaptiveQualityLocked", settings.adaptiveQualityLocked)
+            put("onboardingCompleted", settings.onboardingCompleted)
+            put("dualDestinationEnabled", settings.dualDestinationEnabled)
+            put("benchmarkRecords", JSONArray().apply {
+                settings.benchmarkRecords.forEach { b ->
+                    put(JSONObject().apply {
+                        put("id", b.id)
+                        put("appName", b.appName)
+                        put("presetLabel", b.presetLabel)
+                        put("gameName", b.gameName)
+                        put("gameAvgFps", b.gameAvgFps.toDouble())
+                        put("gameOnePercentLowFps", b.gameOnePercentLowFps.toDouble())
+                        put("streamDroppedPct", b.streamDroppedPct.toDouble())
+                        put("peakThermalLabel", b.peakThermalLabel)
+                        put("processPssMb", b.processPssMb)
+                        put("notes", b.notes)
+                        put("recordedAtIso", b.recordedAtIso)
+                    })
+                }
+            })
             put("audioFilters", JSONObject().apply {
                 settings.audioFilters.forEach { (chId, f) ->
                     put(chId, encodeAudioFilter(f))
@@ -346,6 +370,30 @@ class SceneCollectionRepository(private val context: Context) {
                 }
             }.ifEmpty { listOf(AppProfile(videoConfig = videoConfig)) }
 
+            val benchmarks = buildList {
+                val bArr = obj.optJSONArray("benchmarkRecords")
+                if (bArr != null) {
+                    for (i in 0 until bArr.length()) {
+                        val b = bArr.optJSONObject(i) ?: continue
+                        add(
+                            com.example.mobilelabs.model.BenchmarkRecord(
+                                id = b.optString("id", "bench_$i"),
+                                appName = b.optString("appName", "Mobile Labs"),
+                                presetLabel = b.optString("presetLabel", "Balanced 720p60"),
+                                gameName = b.optString("gameName", "Geometry Dash"),
+                                gameAvgFps = b.optDouble("gameAvgFps", 0.0).toFloat(),
+                                gameOnePercentLowFps = b.optDouble("gameOnePercentLowFps", 0.0).toFloat(),
+                                streamDroppedPct = b.optDouble("streamDroppedPct", 0.0).toFloat(),
+                                peakThermalLabel = b.optString("peakThermalLabel", "TEMP OK"),
+                                processPssMb = b.optInt("processPssMb", 0),
+                                notes = b.optString("notes", ""),
+                                recordedAtIso = b.optString("recordedAtIso", "")
+                            )
+                        )
+                    }
+                }
+            }
+
             PersistedSettings(
                 videoConfig = videoConfig,
                 floatingOverlayEnabled = obj.optBoolean("floatingOverlayEnabled", false),
@@ -360,7 +408,11 @@ class SceneCollectionRepository(private val context: Context) {
                 audioFilters = audioFiltersMap,
                 profiles = profilesList,
                 activeProfileId = obj.optString("activeProfileId", profilesList.first().id),
-                savedCollections = listSavedCollectionNames()
+                savedCollections = listSavedCollectionNames(),
+                adaptiveQualityLocked = obj.optBoolean("adaptiveQualityLocked", false),
+                onboardingCompleted = obj.optBoolean("onboardingCompleted", false),
+                dualDestinationEnabled = obj.optBoolean("dualDestinationEnabled", false),
+                benchmarkRecords = benchmarks
             )
         }.getOrElse { PersistedSettings(savedCollections = listSavedCollectionNames()) }
     }

@@ -143,6 +143,7 @@ class GlZeroCopyCompositor {
     private val studioModeRef = AtomicBoolean(false)
     private val activeTransitionRef = AtomicReference<ActiveTransition?>(null)
     private val cameraFrontRef = AtomicBoolean(true)
+    private val heavyFiltersSuspendedRef = AtomicBoolean(false)
 
     // Bounded GPU texture cache (max 16 images/text overlays)
     private val textureCache = LinkedHashMap<String, CachedTexture>(16, 0.75f, true)
@@ -290,6 +291,10 @@ class GlZeroCopyCompositor {
 
     fun setPreviewEnabled(enabled: Boolean) {
         previewEnabled.set(enabled)
+    }
+
+    fun setHeavyFiltersSuspended(suspended: Boolean) {
+        heavyFiltersSuspendedRef.set(suspended)
     }
 
     fun snapshotStats(): CompositorStats {
@@ -885,26 +890,27 @@ class GlZeroCopyCompositor {
         texW: Int,
         texH: Int
     ) {
+        val suspended = heavyFiltersSuspendedRef.get()
         val baseOpacity = if (f.colorCorrectionEnabled) f.opacity else 1f
         GLES30.glUniform1f(locs.uOpacity, (baseOpacity * globalAlpha).coerceIn(0f, 1f))
-        GLES30.glUniform1i(locs.uColorEnabled, if (f.colorCorrectionEnabled) 1 else 0)
+        GLES30.glUniform1i(locs.uColorEnabled, if (!suspended && f.colorCorrectionEnabled) 1 else 0)
         GLES30.glUniform1f(locs.uBrightness, f.brightness)
         GLES30.glUniform1f(locs.uContrast, f.contrast)
         GLES30.glUniform1f(locs.uSaturation, f.saturation)
         GLES30.glUniform1f(locs.uGamma, f.gamma)
 
-        GLES30.glUniform1i(locs.uChromaEnabled, if (f.chromaKeyEnabled) 1 else 0)
+        GLES30.glUniform1i(locs.uChromaEnabled, if (!suspended && f.chromaKeyEnabled) 1 else 0)
         val ckR = ((f.chromaKeyColorArgb ushr 16) and 0xFF) / 255f
         val ckG = ((f.chromaKeyColorArgb ushr 8) and 0xFF) / 255f
         val ckB = (f.chromaKeyColorArgb and 0xFF) / 255f
         GLES30.glUniform3f(locs.uChromaColor, ckR, ckG, ckB)
         GLES30.glUniform3f(locs.uChromaParams, f.chromaSimilarity, f.chromaSmoothness, f.chromaSpill)
 
-        GLES30.glUniform1i(locs.uSharpenEnabled, if (f.sharpenEnabled) 1 else 0)
+        GLES30.glUniform1i(locs.uSharpenEnabled, if (!suspended && f.sharpenEnabled) 1 else 0)
         GLES30.glUniform1f(locs.uSharpenAmount, f.sharpenAmount)
         GLES30.glUniform2f(locs.uTexelSize, 1f / max(1, texW), 1f / max(1, texH))
 
-        val lutIdx = if (!f.lutEnabled) 0 else when (f.lutPreset) {
+        val lutIdx = if (suspended || !f.lutEnabled) 0 else when (f.lutPreset) {
             LutPreset.NONE -> 0
             LutPreset.VIVID_GAMING -> 1
             LutPreset.TEAL_ORANGE -> 2

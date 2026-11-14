@@ -10,6 +10,7 @@ class MobileLabsApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        com.example.mobilelabs.diagnostics.LocalCrashHandler(applicationContext).install()
         sessionController = SessionController(applicationContext)
         sessionController.initialize()
     }

@@ -75,9 +75,13 @@ class HardwareMediaPipeline(
     private val recordBytesWritten = AtomicLong(0L)
     private val muxerLock = Any()
 
-    // Independent RTMP/RTMPS state
+    // Independent RTMP/RTMPS state (Primary + Phase 3 Dual Destination sharing the single HW encode)
     private val streamActive = AtomicBoolean(false)
     private var rtmpSender: RtmpFlvSender? = null
+
+    private val secondaryStreamActive = AtomicBoolean(false)
+    private var secondaryRtmpSender: RtmpFlvSender? = null
+    private val secondaryNetworkDroppedFrames = AtomicLong(0)
 
     // Telemetry counters
     @Volatile var encoderMode = EncoderFallbackLevel.OPTIMAL_HW_SURFACE
@@ -193,6 +197,39 @@ class HardwareMediaPipeline(
         rtmpSender = null
     }
 
+    fun startSecondaryStreaming(
+        rtmpBaseUrl: String,
+        streamKey: String,
+        videoConfig: VideoConfig,
+        onConnected: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        if (secondaryStreamActive.getAndSet(true)) return
+        val sender = RtmpFlvSender(
+            baseUrl = rtmpBaseUrl,
+            streamKey = streamKey,
+            width = videoConfig.outputWidth,
+            height = videoConfig.outputHeight,
+            fps = videoConfig.fps,
+            videoBitrateKbps = videoConfig.videoBitrateKbps,
+            audioBitrateKbps = videoConfig.audioBitrateKbps,
+            onConnected = onConnected,
+            onFailure = { reason ->
+                secondaryStreamActive.set(false)
+                onError(reason)
+            },
+            onNetworkDrop = { secondaryNetworkDroppedFrames.incrementAndGet() }
+        )
+        secondaryRtmpSender = sender
+        sender.start(videoConfigBytes, audioConfigBytes)
+    }
+
+    fun stopSecondaryStreaming() {
+        if (!secondaryStreamActive.getAndSet(false)) return
+        secondaryRtmpSender?.stop()
+        secondaryRtmpSender = null
+    }
+
     fun pushAudioPcm(pcm16Stereo: ShortArray, sampleCount: Int, ptsUs: Long) {
         val codec = audioEncoder ?: return
         if (!audioRunning.get()) return
@@ -214,6 +251,7 @@ class HardwareMediaPipeline(
 
     fun stopEncoders() {
         stopStreaming()
+        stopSecondaryStreaming()
         stopRecording()
 
         videoRunning.set(false)
@@ -235,6 +273,8 @@ class HardwareMediaPipeline(
 
     fun getEncoderQueueDepth(): Int = rtmpSender?.queueDepth() ?: 0
     fun getRtmpBufferedBytes(): Long = rtmpSender?.bufferedBytes() ?: 0L
+    fun getSecondaryBufferedBytes(): Long = secondaryRtmpSender?.bufferedBytes() ?: 0L
+    fun getSecondaryDroppedFrames(): Long = secondaryNetworkDroppedFrames.get()
     fun getEncoderDroppedFrames(): Long = encoderDroppedFrames.get()
     fun getNetworkDroppedFrames(): Long = networkDroppedFrames.get()
     fun getActualBitrateKbps(): Int = currentBitrateKbps.get()
@@ -328,12 +368,18 @@ class HardwareMediaPipeline(
                             val dup = buf.duplicate()
                             writeMuxerSample(isVideo = true, data = dup, info = info)
 
-                            if (streamActive.get()) {
+                            if (streamActive.get() || secondaryStreamActive.get()) {
                                 val packetBytes = ByteArray(info.size)
                                 buf.position(info.offset)
                                 buf.get(packetBytes)
+                                val ptsMs = info.presentationTimeUs / 1000L
                                 val isKey = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
-                                rtmpSender?.enqueueVideo(packetBytes, info.presentationTimeUs / 1000L, isKey)
+                                if (streamActive.get()) {
+                                    rtmpSender?.enqueueVideo(packetBytes, ptsMs, isKey)
+                                }
+                                if (secondaryStreamActive.get()) {
+                                    secondaryRtmpSender?.enqueueVideo(packetBytes, ptsMs, isKey)
+                                }
                             }
                         }
                     }
@@ -388,11 +434,17 @@ class HardwareMediaPipeline(
                             audioConfigBytes = copy
                         } else {
                             writeMuxerSample(isVideo = false, data = buf.duplicate(), info = info)
-                            if (streamActive.get()) {
+                            if (streamActive.get() || secondaryStreamActive.get()) {
                                 val aBytes = ByteArray(info.size)
                                 buf.position(info.offset)
                                 buf.get(aBytes)
-                                rtmpSender?.enqueueAudio(aBytes, info.presentationTimeUs / 1000L)
+                                val ptsMs = info.presentationTimeUs / 1000L
+                                if (streamActive.get()) {
+                                    rtmpSender?.enqueueAudio(aBytes, ptsMs)
+                                }
+                                if (secondaryStreamActive.get()) {
+                                    secondaryRtmpSender?.enqueueAudio(aBytes, ptsMs)
+                                }
                             }
                         }
                     }

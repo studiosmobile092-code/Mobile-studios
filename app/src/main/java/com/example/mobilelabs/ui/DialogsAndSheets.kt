@@ -56,6 +56,11 @@ import com.example.mobilelabs.model.SessionPhase
 import com.example.mobilelabs.model.VideoConfig
 import com.example.ui.theme.ApertureRed
 import com.example.ui.theme.ApertureRedHi
+import com.example.ui.theme.ObsBorder
+import com.example.ui.theme.ObsHeaderBg
+import com.example.ui.theme.ObsSelectionBlue
+import com.example.ui.theme.ObsWellBg
+import com.example.ui.theme.ObsWindowBg
 import com.example.ui.theme.StatusOk
 import com.example.ui.theme.StatusWarn
 import com.example.ui.theme.StudioBg
@@ -71,6 +76,8 @@ data class SettingsDialogCallbacks(
     val onUpdateVideoConfig: (VideoConfig) -> Unit,
     val onUpdateScreenFit: (ScreenFitMode, Float) -> Unit,
     val onSaveStreamCredentials: (RtmpServicePreset, String, String?) -> Unit,
+    val onSaveSecondaryCredentials: (Boolean, RtmpServicePreset, String, String?) -> Unit,
+    val onToggleAdaptiveLock: (Boolean) -> Unit,
     val onPickRecordingFolder: () -> Unit,
     val onResetRecordingFolder: () -> Unit,
     val onCreateProfile: (String) -> Unit,
@@ -81,7 +88,8 @@ data class SettingsDialogCallbacks(
     val onDeleteCollection: (String) -> Unit,
     val onExportObsJson: () -> Unit,
     val onImportObsJson: () -> Unit,
-    val onRequestEnableOverlay: (Boolean) -> Unit
+    val onRequestEnableOverlay: (Boolean) -> Unit,
+    val onOpenAboutLicenses: () -> Unit
 )
 
 @Composable
@@ -93,6 +101,12 @@ fun SettingsDialog(
     var selectedPreset by remember { mutableStateOf(state.rtmpServicePreset) }
     var urlText by remember { mutableStateOf(state.rtmpServerUrl) }
     var streamKeyInput by remember { mutableStateOf("") }
+
+    var dualEnabled by remember { mutableStateOf(state.dualDestination.enabled) }
+    var secPreset by remember { mutableStateOf(state.dualDestination.preset) }
+    var secUrlText by remember { mutableStateOf(state.dualDestination.serverUrl) }
+    var secKeyInput by remember { mutableStateOf("") }
+
     var newProfileName by remember { mutableStateOf("") }
     var newCollectionName by remember { mutableStateOf("") }
     var showOverlayRationale by remember { mutableStateOf(false) }
@@ -102,9 +116,9 @@ fun SettingsDialog(
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Surface(
-            color = SurfaceLevel1,
-            shape = RoundedCornerShape(8.dp),
-            border = BorderStroke(1.dp, StudioDivider),
+            color = ObsWindowBg,
+            shape = RoundedCornerShape(4.dp),
+            border = BorderStroke(1.dp, ObsBorder),
             modifier = Modifier.fillMaxWidth(0.88f).fillMaxHeight(0.90f)
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
@@ -113,11 +127,11 @@ fun SettingsDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Mobile Labs Settings", style = MaterialTheme.typography.titleMedium, color = StudioText)
+                    Text("Settings", style = MaterialTheme.typography.titleMedium, color = StudioText)
                     TextButton(onClick = callbacks.onDismiss) { Text("Close", color = StudioText) }
                 }
 
-                TabRow(selectedTabIndex = tabIndex, containerColor = SurfaceLevel2, contentColor = StudioText) {
+                TabRow(selectedTabIndex = tabIndex, containerColor = ObsHeaderBg, contentColor = StudioText) {
                     Tab(selected = tabIndex == 0, onClick = { tabIndex = 0 }, text = { Text("Stream") })
                     Tab(selected = tabIndex == 1, onClick = { tabIndex = 1 }, text = { Text("Output") })
                     Tab(selected = tabIndex == 2, onClick = { tabIndex = 2 }, text = { Text("Audio") })
@@ -133,7 +147,7 @@ fun SettingsDialog(
                 ) {
                     when (tabIndex) {
                         0 -> {
-                            Text("RTMP / RTMPS Service Preset", style = MaterialTheme.typography.titleSmall, color = StudioText)
+                            Text("Primary RTMP / RTMPS Service Preset", style = MaterialTheme.typography.titleSmall, color = StudioText)
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 RtmpServicePreset.entries.forEach { preset ->
                                     val active = selectedPreset == preset
@@ -142,9 +156,9 @@ fun SettingsDialog(
                                             selectedPreset = preset
                                             urlText = preset.defaultUrl
                                         },
-                                        border = BorderStroke(1.dp, if (active) ApertureRedHi else StudioDivider),
+                                        border = BorderStroke(1.dp, if (active) ObsSelectionBlue else ObsBorder),
                                         colors = ButtonDefaults.outlinedButtonColors(
-                                            containerColor = if (active) ApertureRed.copy(alpha = 0.4f) else SurfaceLevel2
+                                            containerColor = if (active) ObsSelectionBlue.copy(alpha = 0.4f) else ObsWellBg
                                         )
                                     ) { Text(preset.label, color = StudioText) }
                                 }
@@ -152,14 +166,14 @@ fun SettingsDialog(
                             OutlinedTextField(
                                 value = urlText,
                                 onValueChange = { urlText = it },
-                                label = { Text("RTMP / RTMPS Server URL") },
+                                label = { Text("Primary RTMP / RTMPS Server URL") },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth().testTag("rtmp_url_input")
                             )
                             OutlinedTextField(
                                 value = streamKeyInput,
                                 onValueChange = { streamKeyInput = it },
-                                label = { Text("Stream Key (stored in Android Keystore, never exported)") },
+                                label = { Text("Primary Stream Key (Android Keystore AES-256-GCM)") },
                                 placeholder = { Text("Saved: ${state.maskedStreamKeyPreview}") },
                                 visualTransformation = PasswordVisualTransformation(),
                                 singleLine = true,
@@ -170,9 +184,68 @@ fun SettingsDialog(
                                     callbacks.onSaveStreamCredentials(selectedPreset, urlText, streamKeyInput.ifBlank { null })
                                     streamKeyInput = ""
                                 },
-                                colors = ButtonDefaults.buttonColors(containerColor = ApertureRed),
+                                colors = ButtonDefaults.buttonColors(containerColor = ObsSelectionBlue),
                                 modifier = Modifier.testTag("save_stream_settings_button")
-                            ) { Text("Save Encrypted Credentials", color = StudioText) }
+                            ) { Text("Save Primary Credentials", color = StudioText) }
+
+                            HorizontalDivider(color = ObsBorder)
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("Dual RTMP(S) Destination (M3.4 · Shared HW Encode)", style = MaterialTheme.typography.titleSmall, color = StudioText)
+                                    Text(
+                                        "Streams the single shared hardware H.264/AAC encode to a second destination without a second encoder.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = StudioTextDim
+                                    )
+                                }
+                                Switch(
+                                    checked = dualEnabled,
+                                    onCheckedChange = { dualEnabled = it },
+                                    modifier = Modifier.testTag("dual_rtmp_switch")
+                                )
+                            }
+                            if (dualEnabled) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    RtmpServicePreset.entries.forEach { p ->
+                                        val active = secPreset == p
+                                        OutlinedButton(
+                                            onClick = {
+                                                secPreset = p
+                                                secUrlText = p.defaultUrl
+                                            },
+                                            border = BorderStroke(1.dp, if (active) ObsSelectionBlue else ObsBorder)
+                                        ) { Text(p.label, color = StudioText) }
+                                    }
+                                }
+                                OutlinedTextField(
+                                    value = secUrlText,
+                                    onValueChange = { secUrlText = it },
+                                    label = { Text("Secondary RTMP / RTMPS Server URL") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                OutlinedTextField(
+                                    value = secKeyInput,
+                                    onValueChange = { secKeyInput = it },
+                                    label = { Text("Secondary Stream Key (Keystore Encrypted)") },
+                                    placeholder = { Text("Saved: ${state.dualDestination.maskedKeyPreview}") },
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    callbacks.onSaveSecondaryCredentials(dualEnabled, secPreset, secUrlText, secKeyInput.ifBlank { null })
+                                    secKeyInput = ""
+                                },
+                                modifier = Modifier.testTag("save_dual_destination_button")
+                            ) { Text("Save Dual Destination", color = StudioText) }
                         }
                         1 -> {
                             Text("Encoder Preset Ladder (§8.4)", style = MaterialTheme.typography.titleSmall, color = StudioText)
@@ -183,9 +256,9 @@ fun SettingsDialog(
                                         it.isHardwareAccelerated && it.supportsSurfaceInput && it.supports1080p60
                                     } != false
                                 Surface(
-                                    color = if (selected) ApertureRed.copy(alpha = 0.35f) else SurfaceLevel2,
-                                    shape = RoundedCornerShape(6.dp),
-                                    border = BorderStroke(1.dp, if (selected) ApertureRedHi else StudioDivider),
+                                    color = if (selected) ObsSelectionBlue.copy(alpha = 0.45f) else ObsWellBg,
+                                    shape = RoundedCornerShape(4.dp),
+                                    border = BorderStroke(1.dp, if (selected) ObsSelectionBlue else ObsBorder),
                                     modifier = Modifier.fillMaxWidth().clickable(enabled = !locked1080p60) { callbacks.onApplyPreset(preset) }
                                 ) {
                                     Row(
@@ -205,14 +278,14 @@ fun SettingsDialog(
                                     }
                                 }
                             }
-                            HorizontalDivider(color = StudioDivider)
+                            HorizontalDivider(color = ObsBorder)
                             Text("Recording Container & Output Folder (SAF)", style = MaterialTheme.typography.titleSmall, color = StudioText)
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 RecordingFormat.entries.forEach { fmt ->
                                     val active = state.videoConfig.recordingFormat == fmt
                                     OutlinedButton(
                                         onClick = { callbacks.onUpdateVideoConfig(state.videoConfig.copy(recordingFormat = fmt)) },
-                                        border = BorderStroke(1.dp, if (active) ApertureRedHi else StudioDivider)
+                                        border = BorderStroke(1.dp, if (active) ObsSelectionBlue else ObsBorder)
                                     ) { Text(fmt.label, color = StudioText) }
                                 }
                             }
@@ -236,7 +309,7 @@ fun SettingsDialog(
                                     val active = state.videoConfig.audioBitrateKbps == kbps
                                     OutlinedButton(
                                         onClick = { callbacks.onUpdateVideoConfig(state.videoConfig.copy(audioBitrateKbps = kbps)) },
-                                        border = BorderStroke(1.dp, if (active) ApertureRedHi else StudioDivider)
+                                        border = BorderStroke(1.dp, if (active) ObsSelectionBlue else ObsBorder)
                                     ) { Text("$kbps kbps", color = StudioText) }
                                 }
                             }
@@ -274,18 +347,18 @@ fun SettingsDialog(
                                     val active = state.videoConfig.downscaleFilter == df
                                     OutlinedButton(
                                         onClick = { callbacks.onUpdateVideoConfig(state.videoConfig.copy(downscaleFilter = df)) },
-                                        border = BorderStroke(1.dp, if (active) ApertureRedHi else StudioDivider)
+                                        border = BorderStroke(1.dp, if (active) ObsSelectionBlue else ObsBorder)
                                     ) { Text(df.label, color = StudioText) }
                                 }
                             }
-                            HorizontalDivider(color = StudioDivider)
+                            HorizontalDivider(color = ObsBorder)
                             Text("16:10 Tablet Display → 16:9 Stream Fit (§6.2)", style = MaterialTheme.typography.titleSmall, color = StudioText)
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 ScreenFitMode.entries.forEach { mode ->
                                     val active = state.videoConfig.screenFitMode == mode
                                     OutlinedButton(
                                         onClick = { callbacks.onUpdateScreenFit(mode, state.videoConfig.screenCropOffsetYFraction) },
-                                        border = BorderStroke(1.dp, if (active) ApertureRedHi else StudioDivider)
+                                        border = BorderStroke(1.dp, if (active) ObsSelectionBlue else ObsBorder)
                                     ) { Text(mode.label, color = StudioText) }
                                 }
                             }
@@ -298,7 +371,6 @@ fun SettingsDialog(
                             }
                         }
                         4 -> {
-                            // Profiles, Scene Collections, OBS JSON Import/Export, Overlay & Licenses
                             Text("Profiles & Scene Collections (M2.5)", style = MaterialTheme.typography.titleSmall, color = StudioText)
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                                 OutlinedTextField(
@@ -313,7 +385,7 @@ fun SettingsDialog(
                                         callbacks.onCreateProfile(newProfileName)
                                         newProfileName = ""
                                     },
-                                    colors = ButtonDefaults.buttonColors(containerColor = ApertureRed)
+                                    colors = ButtonDefaults.buttonColors(containerColor = ObsSelectionBlue)
                                 ) { Text("Save Profile", color = StudioText) }
                             }
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -321,7 +393,7 @@ fun SettingsDialog(
                                     val active = prof.id == state.activeProfileId
                                     OutlinedButton(
                                         onClick = { callbacks.onSelectProfile(prof.id) },
-                                        border = BorderStroke(1.dp, if (active) ApertureRedHi else StudioDivider)
+                                        border = BorderStroke(1.dp, if (active) ObsSelectionBlue else ObsBorder)
                                     ) { Text(prof.name, color = StudioText) }
                                     if (state.profiles.size > 1 && !active) {
                                         TextButton(onClick = { callbacks.onDeleteProfile(prof.id) }) { Text("✕", color = StatusWarn) }
@@ -329,7 +401,7 @@ fun SettingsDialog(
                                 }
                             }
 
-                            HorizontalDivider(color = StudioDivider)
+                            HorizontalDivider(color = ObsBorder)
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                                 OutlinedTextField(
                                     value = newCollectionName,
@@ -352,7 +424,7 @@ fun SettingsDialog(
                                     val active = colName == state.sceneCollection.name
                                     OutlinedButton(
                                         onClick = { callbacks.onSwitchCollection(colName) },
-                                        border = BorderStroke(1.dp, if (active) ApertureRedHi else StudioDivider)
+                                        border = BorderStroke(1.dp, if (active) ObsSelectionBlue else ObsBorder)
                                     ) { Text(colName, color = StudioText) }
                                     if (state.savedCollectionNames.size > 1 && !active) {
                                         TextButton(onClick = { callbacks.onDeleteCollection(colName) }) { Text("✕", color = StatusWarn) }
@@ -362,7 +434,7 @@ fun SettingsDialog(
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Button(
                                     onClick = callbacks.onExportObsJson,
-                                    colors = ButtonDefaults.buttonColors(containerColor = ApertureRed),
+                                    colors = ButtonDefaults.buttonColors(containerColor = ObsSelectionBlue),
                                     modifier = Modifier.testTag("export_obs_json_button")
                                 ) { Text("Export OBS JSON", color = StudioText) }
                                 OutlinedButton(
@@ -371,9 +443,9 @@ fun SettingsDialog(
                                 ) { Text("Import OBS JSON", color = StudioText) }
                             }
 
-                            HorizontalDivider(color = StudioDivider)
+                            HorizontalDivider(color = ObsBorder)
                             Row(
-                                modifier = Modifier.fillMaxWidth().background(SurfaceLevel2, RoundedCornerShape(6.dp)).padding(10.dp),
+                                modifier = Modifier.fillMaxWidth().background(ObsWellBg, RoundedCornerShape(4.dp)).padding(10.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
@@ -396,7 +468,7 @@ fun SettingsDialog(
                             }
 
                             Row(
-                                modifier = Modifier.fillMaxWidth().background(SurfaceLevel2, RoundedCornerShape(6.dp)).padding(10.dp),
+                                modifier = Modifier.fillMaxWidth().background(ObsWellBg, RoundedCornerShape(4.dp)).padding(10.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
@@ -409,14 +481,20 @@ fun SettingsDialog(
                                 )
                             }
 
-                            Surface(color = SurfaceLevel2, shape = RoundedCornerShape(6.dp), modifier = Modifier.fillMaxWidth()) {
-                                Text(
-                                    text = "Mobile Labs integrates the OBS Studio libobs engine (GPL-2.0-or-later, baseline 32.2.1 commit 57bfcf10a) with Android hardware MediaCodec/GLES3 modules.\n" +
-                                        "Zero analytics SDKs · Zero ad SDKs · Stream keys encrypted locally in Android Keystore.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = StudioTextDim,
-                                    modifier = Modifier.padding(10.dp)
+                            Row(
+                                modifier = Modifier.fillMaxWidth().background(ObsWellBg, RoundedCornerShape(4.dp)).padding(10.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Lock Adaptive Quality (Don't adapt during stream)", style = MaterialTheme.typography.bodySmall, color = StudioText)
+                                Switch(
+                                    checked = state.adaptiveQuality.lockedByUser,
+                                    onCheckedChange = callbacks.onToggleAdaptiveLock
                                 )
+                            }
+
+                            OutlinedButton(onClick = callbacks.onOpenAboutLicenses) {
+                                Text("About Mobile Labs · SBOM & GPL-2.0 Source Offer", color = StudioText)
                             }
                         }
                     }
@@ -457,9 +535,9 @@ fun DiagnosticsAndProbesDialog(
     var tabIndex by remember { mutableIntStateOf(0) }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(
-            color = SurfaceLevel1,
-            shape = RoundedCornerShape(8.dp),
-            border = BorderStroke(1.dp, StudioDivider),
+            color = ObsWindowBg,
+            shape = RoundedCornerShape(4.dp),
+            border = BorderStroke(1.dp, ObsBorder),
             modifier = Modifier.fillMaxWidth(0.88f).fillMaxHeight(0.88f)
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
@@ -476,12 +554,12 @@ fun DiagnosticsAndProbesDialog(
                 }
                 if (state.lastDiagnosticsExportPath != null) {
                     Text(
-                        text = "Last export: ${state.lastDiagnosticsExportPath} (stream keys stripped)",
+                        text = "Last export: ${state.lastDiagnosticsExportPath} (primary & secondary keys stripped)",
                         style = MaterialTheme.typography.labelSmall,
                         color = StatusOk
                     )
                 }
-                TabRow(selectedTabIndex = tabIndex, containerColor = SurfaceLevel2, contentColor = StudioText) {
+                TabRow(selectedTabIndex = tabIndex, containerColor = ObsHeaderBg, contentColor = StudioText) {
                     Tab(selected = tabIndex == 0, onClick = { tabIndex = 0 }, text = { Text("Device & Codec Probe") })
                     Tab(selected = tabIndex == 1, onClick = { tabIndex = 1 }, text = { Text("Recordings (${state.incompleteRecordings.size} incomplete)") })
                     Tab(selected = tabIndex == 2, onClick = { tabIndex = 2 }, text = { Text("Event Log") })
@@ -505,7 +583,7 @@ fun DiagnosticsAndProbesDialog(
                         Spacer(Modifier.height(6.dp))
                         LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             items(rep?.encoders.orEmpty()) { enc ->
-                                Surface(color = SurfaceLevel2, shape = RoundedCornerShape(6.dp), modifier = Modifier.fillMaxWidth()) {
+                                Surface(color = ObsWellBg, shape = RoundedCornerShape(4.dp), border = BorderStroke(1.dp, ObsBorder), modifier = Modifier.fillMaxWidth()) {
                                     Column(modifier = Modifier.padding(10.dp)) {
                                         Text(
                                             text = "${enc.name} (${enc.mimeType}) · ${if (enc.isHardwareAccelerated) "HARDWARE" else "SOFTWARE"}",
@@ -527,7 +605,7 @@ fun DiagnosticsAndProbesDialog(
                             if (state.incompleteRecordings.isNotEmpty()) {
                                 item { Text("Interrupted / Incomplete Recordings", style = MaterialTheme.typography.titleSmall, color = StatusWarn) }
                                 items(state.incompleteRecordings) { inc ->
-                                    Surface(color = SurfaceLevel2, shape = RoundedCornerShape(6.dp), modifier = Modifier.fillMaxWidth()) {
+                                    Surface(color = ObsWellBg, shape = RoundedCornerShape(4.dp), modifier = Modifier.fillMaxWidth()) {
                                         Column(modifier = Modifier.padding(10.dp)) {
                                             Text("${inc.fileName} · ${inc.statusNote}", style = MaterialTheme.typography.labelMedium, color = StatusWarn)
                                             Text("Size: ${inc.bytesOnDisk / 1024} KB · ${inc.filePath}", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
@@ -537,7 +615,7 @@ fun DiagnosticsAndProbesDialog(
                             }
                             item { Text("Finalized Recordings", style = MaterialTheme.typography.titleSmall, color = StudioText) }
                             items(state.recentRecordings) { rec ->
-                                Surface(color = SurfaceLevel2, shape = RoundedCornerShape(6.dp), modifier = Modifier.fillMaxWidth()) {
+                                Surface(color = ObsWellBg, shape = RoundedCornerShape(4.dp), modifier = Modifier.fillMaxWidth()) {
                                     Column(modifier = Modifier.padding(10.dp)) {
                                         Text("${rec.fileName} · ${rec.durationSec}s · ${rec.bytesSize / 1024} KB", style = MaterialTheme.typography.labelMedium, color = StatusOk)
                                         Text(rec.mediaStoreUri, style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
@@ -548,7 +626,7 @@ fun DiagnosticsAndProbesDialog(
                     }
                     2 -> {
                         LazyColumn(
-                            modifier = Modifier.weight(1f).fillMaxWidth().background(StudioBg, RoundedCornerShape(6.dp)).padding(8.dp),
+                            modifier = Modifier.weight(1f).fillMaxWidth().background(ObsWellBg, RoundedCornerShape(4.dp)).padding(8.dp),
                             verticalArrangement = Arrangement.spacedBy(3.dp)
                         ) {
                             items(state.eventLog.asReversed()) { line ->
