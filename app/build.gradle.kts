@@ -44,6 +44,7 @@ android {
   }
 
   if (enableLibObsNative) {
+    sourceSets["main"].jniLibs.srcDir("src/main/cpp/jniLibs")
     externalNativeBuild {
       cmake {
         path = file("src/main/cpp/CMakeLists.txt")

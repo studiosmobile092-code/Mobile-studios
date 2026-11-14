@@ -90,7 +90,7 @@ class SessionController(private val context: Context) {
     private val probeTool = DeviceAndCodecProbe(context)
     private val obsBridge = ObsEngineBridge(context)
     private val diagnosticsExporter = DiagnosticsExporter(context)
-    private val compositor = GlZeroCopyCompositor()
+    private val compositor = GlZeroCopyCompositor(context)
     private val adaptiveEngine = AdaptiveQualityEngine()
 
     private val _uiState = MutableStateFlow(MobileLabsUiState())
@@ -105,6 +105,9 @@ class SessionController(private val context: Context) {
     private var streamStartedAtMs = 0L
     private var recordStartedAtMs = 0L
     private var reconnectCount = 0
+    private var lastNetworkDropSeen = 0L
+    private var cleanNetworkSeconds = 0
+    private var dynamicTargetBitrateKbps = 0
     private var overlayLandscapePos = Pair(24, 180)
     private var overlayPortraitPos = Pair(24, 240)
     private var cameraSurfaceRef: Surface? = null
@@ -152,7 +155,8 @@ class SessionController(private val context: Context) {
         _uiState.update { cur ->
             val hydratedChannels = cur.audioChannels.map { ch ->
                 val f = loadedSettings.audioFilters[ch.id] ?: ch.filters
-                ch.copy(filters = f)
+                val sync = loadedSettings.audioSyncOffsetsMs[ch.id] ?: ch.syncOffsetMs
+                ch.copy(filters = f, syncOffsetMs = sync)
             }
             cur.copy(
                 engineBackend = obsBridge.backendStatus,
@@ -332,7 +336,11 @@ class SessionController(private val context: Context) {
             }
         )
         pipeline = pipe
+        pipe.customRecordingFolderUri = _uiState.value.customRecordingFolderUri
         pipe.startEncoders(cfg)
+        dynamicTargetBitrateKbps = cfg.videoBitrateKbps
+        lastNetworkDropSeen = 0L
+        cleanNetworkSeconds = 0
 
         val st = _uiState.value
         val mixer = AudioCaptureMixer(context) { pcm, count, ptsUs ->
@@ -343,11 +351,13 @@ class SessionController(private val context: Context) {
             if (gCh != null) {
                 gameVolume = gCh.volume
                 gameMuted = gCh.muted
+                gameSyncOffsetMs = gCh.syncOffsetMs
                 gameFilters = gCh.filters
             }
             if (mCh != null) {
                 micVolume = mCh.volume
                 micMuted = mCh.muted
+                micSyncOffsetMs = mCh.syncOffsetMs
                 micFilters = mCh.filters
             }
             masterMuted = st.masterMuted
@@ -594,6 +604,8 @@ class SessionController(private val context: Context) {
     fun updateVideoConfig(newConfig: VideoConfig) {
         compositor.updateVideoConfig(newConfig)
         obsBridge.reconfigureVideo(newConfig)
+        pipeline?.recordingFormat = newConfig.recordingFormat
+        dynamicTargetBitrateKbps = newConfig.videoBitrateKbps
         pipeline?.updateLiveBitrate(newConfig.videoBitrateKbps)
         _uiState.update {
             it.copy(
@@ -670,6 +682,7 @@ class SessionController(private val context: Context) {
     }
 
     fun setCustomRecordingFolderUri(uri: String?) {
+        pipeline?.customRecordingFolderUri = uri
         _uiState.update {
             it.copy(
                 customRecordingFolderUri = uri,
@@ -677,6 +690,63 @@ class SessionController(private val context: Context) {
             )
         }
         persistCurrentSettings()
+    }
+
+    fun recoverIncompleteRecording(filePath: String) {
+        scope.launch(Dispatchers.IO) {
+            val file = java.io.File(filePath)
+            val ok = file.exists() && repository.verifyMediaPlayable(file)
+            if (ok) {
+                val uri = pipeline?.publishExistingPlayableFile(file) ?: run {
+                    // Fallback copy to MediaStore if pipeline isn't currently armed
+                    val tempPipe = HardwareMediaPipeline(
+                        context = context,
+                        repository = repository,
+                        onEncoderSurfaceReady = {},
+                        onStreamConnected = {},
+                        onStreamError = {},
+                        onRecordingFinalized = {},
+                        onRecordingError = {}
+                    ).apply { customRecordingFolderUri = _uiState.value.customRecordingFolderUri }
+                    tempPipe.publishExistingPlayableFile(file)
+                }
+                repository.clearActiveRecordingMarker()
+                val remaining = repository.detectIncompleteRecordings()
+                _uiState.update { cur ->
+                    val pub = com.example.mobilelabs.model.PublishedRecording(
+                        fileName = file.name,
+                        mediaStoreUri = uri ?: file.absolutePath,
+                        durationSec = 1L,
+                        bytesSize = if (file.exists()) file.length() else 0L,
+                        createdAtMs = System.currentTimeMillis()
+                    )
+                    cur.copy(
+                        incompleteRecordings = remaining,
+                        recentRecordings = (listOf(pub) + cur.recentRecordings).take(20),
+                        statusMessage = "Recovered ${file.name} to library"
+                    )
+                }
+                logEvent("Recovered playable incomplete recording: ${file.name}")
+            } else {
+                _uiState.update { it.copy(statusMessage = "Recording file is unplayable / truncated; delete to free space") }
+            }
+        }
+    }
+
+    fun deleteIncompleteRecording(filePath: String) {
+        scope.launch(Dispatchers.IO) {
+            val f = java.io.File(filePath)
+            if (f.exists()) f.delete()
+            repository.clearActiveRecordingMarker()
+            val remaining = repository.detectIncompleteRecordings()
+            _uiState.update {
+                it.copy(
+                    incompleteRecordings = remaining,
+                    statusMessage = "Deleted incomplete recording ${f.name}"
+                )
+            }
+            logEvent("Deleted incomplete recording: ${f.name}")
+        }
     }
 
     fun setFloatingOverlayEnabled(enabled: Boolean) {
@@ -1403,6 +1473,14 @@ class SessionController(private val context: Context) {
         persistCurrentSettings()
     }
 
+    fun setAudioSyncOffset(channelId: String, offsetMs: Int) {
+        val clamped = offsetMs.coerceIn(-500, 500)
+        if (channelId == "audio_game") audioMixer?.gameSyncOffsetMs = clamped
+        if (channelId == "audio_mic") audioMixer?.micSyncOffsetMs = clamped
+        updateAudioChannel(channelId) { it.copy(syncOffsetMs = clamped) }
+        persistCurrentSettings()
+    }
+
     fun toggleMasterMute() {
         val next = !_uiState.value.masterMuted
         audioMixer?.masterMuted = next
@@ -1760,6 +1838,7 @@ class SessionController(private val context: Context) {
                 val fresh = polled.firstOrNull { it.id == prev.id } ?: prev
                 prev.copy(
                     peakDb = fresh.peakDb,
+                    peakHoldDb = fresh.peakHoldDb,
                     isClipping = fresh.isClipping,
                     activeRouteLabel = fresh.activeRouteLabel,
                     unavailableReason = fresh.unavailableReason,
@@ -1806,8 +1885,10 @@ class SessionController(private val context: Context) {
             logEvent("Adaptive Quality -> ${adaptiveOutcome.state.level.shortTag}: ${adaptiveOutcome.state.lastChangeReason}")
             val scaledBitrate = (cur.videoConfig.videoBitrateKbps * adaptiveOutcome.recommendedBitrateScale).toInt().coerceAtLeast(1500)
             if (adaptiveOutcome.recommendedBitrateScale > 0f && adaptiveOutcome.recommendedBitrateScale < 1f) {
+                dynamicTargetBitrateKbps = scaledBitrate
                 pipe?.updateLiveBitrate(scaledBitrate)
             } else if (adaptiveOutcome.recommendedBitrateScale == 1f) {
+                dynamicTargetBitrateKbps = cur.videoConfig.videoBitrateKbps
                 pipe?.updateLiveBitrate(cur.videoConfig.videoBitrateKbps)
             }
             if (adaptiveOutcome.shouldSwitchLowOverhead && cur.videoConfig.presetId != PresetId.LOW_OVERHEAD) {
@@ -1821,6 +1902,32 @@ class SessionController(private val context: Context) {
                 stopStreaming()
                 if (cur.recordingPhase == RecordingPhase.RECORDING) {
                     stopRecording()
+                }
+            }
+        } else if (cur.sessionPhase == SessionPhase.LIVE && cur.videoConfig.dynamicBitrateEnabled && pipe != null) {
+            // Congestion-driven Dynamic Network Bitrate (step down fast on drops/backlog, recover smoothly)
+            val ceilingBitrate = (cur.videoConfig.videoBitrateKbps * adaptiveOutcome.recommendedBitrateScale)
+                .toInt().coerceAtLeast(1500)
+            val dropsDelta = snapshot.networkDroppedFrames - lastNetworkDropSeen
+            lastNetworkDropSeen = snapshot.networkDroppedFrames
+            val congested = dropsDelta > 0 || snapshot.rtmpBufferedBytes > 256_000L
+            if (congested) {
+                cleanNetworkSeconds = 0
+                val reduced = ((dynamicTargetBitrateKbps.takeIf { it > 0 } ?: ceilingBitrate) * 0.85f)
+                    .toInt().coerceAtLeast(1500)
+                if (reduced < dynamicTargetBitrateKbps || dynamicTargetBitrateKbps == 0) {
+                    dynamicTargetBitrateKbps = reduced
+                    pipe.updateLiveBitrate(reduced)
+                    logEvent("Dynamic Bitrate step-down -> ${reduced} kbps (uplink congestion)")
+                }
+            } else if (dynamicTargetBitrateKbps in 1 until ceilingBitrate) {
+                cleanNetworkSeconds++
+                if (cleanNetworkSeconds >= 10) {
+                    cleanNetworkSeconds = 0
+                    val steppedUp = minOf(ceilingBitrate, dynamicTargetBitrateKbps + 400)
+                    dynamicTargetBitrateKbps = steppedUp
+                    pipe.updateLiveBitrate(steppedUp)
+                    logEvent("Dynamic Bitrate recovery -> ${steppedUp} kbps")
                 }
             }
         }
@@ -1844,6 +1951,7 @@ class SessionController(private val context: Context) {
     private fun persistCurrentSettings() {
         val cur = _uiState.value
         val filterMap = cur.audioChannels.associate { it.id to it.filters }
+        val syncMap = cur.audioChannels.associate { it.id to it.syncOffsetMs }
         val updatedProfiles = cur.profiles.map { prof ->
             if (prof.id == cur.activeProfileId) {
                 prof.copy(
@@ -1867,6 +1975,7 @@ class SessionController(private val context: Context) {
                 swapPreviewProgramOnTake = cur.swapPreviewProgramOnTake,
                 lockPreviewTouchWhileLive = cur.lockPreviewTouchWhileLive,
                 audioFilters = filterMap,
+                audioSyncOffsetsMs = syncMap,
                 profiles = updatedProfiles,
                 activeProfileId = cur.activeProfileId,
                 savedCollections = cur.savedCollectionNames,

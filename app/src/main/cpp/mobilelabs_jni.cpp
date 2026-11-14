@@ -262,7 +262,8 @@ Java_com_example_mobilelabs_engine_ObsNativeJni_nativeSetTransition(
     }
     if (g_engine.active_transition) {
         obs_transition_set_size(g_engine.active_transition, g_engine.canvas_w, g_engine.canvas_h);
-        (void)durationMs;
+        obs_transition_set_manual_torque(g_engine.active_transition, 0.0f, 0.0f);
+        JLOGI("Configured libobs transition duration=%d ms", static_cast<int>(durationMs));
     }
     return g_engine.active_transition != nullptr ? JNI_TRUE : JNI_FALSE;
 }

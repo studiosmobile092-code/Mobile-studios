@@ -89,7 +89,8 @@ data class SettingsDialogCallbacks(
     val onExportObsJson: () -> Unit,
     val onImportObsJson: () -> Unit,
     val onRequestEnableOverlay: (Boolean) -> Unit,
-    val onOpenAboutLicenses: () -> Unit
+    val onOpenAboutLicenses: () -> Unit,
+    val onAudioSyncOffset: (String, Int) -> Unit
 )
 
 @Composable
@@ -313,6 +314,39 @@ fun SettingsDialog(
                                     ) { Text("$kbps kbps", color = StudioText) }
                                 }
                             }
+                            HorizontalDivider(color = ObsBorder)
+                            Text("Per-Channel Audio Sync Offset (-500 to +500 ms)", style = MaterialTheme.typography.titleSmall, color = StudioText)
+                            Text(
+                                "Delay Game Audio or Mic/Aux to eliminate lip-sync or game-rhythm offset.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = StudioTextDim
+                            )
+                            state.audioChannels.forEach { ch ->
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(ObsWellBg, RoundedCornerShape(4.dp))
+                                        .padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text("${ch.label}: ${ch.syncOffsetMs} ms", style = MaterialTheme.typography.labelMedium, color = StudioText)
+                                        TextButton(onClick = { callbacks.onAudioSyncOffset(ch.id, 0) }) {
+                                            Text("0 ms", color = StudioTextDim)
+                                        }
+                                    }
+                                    Slider(
+                                        value = ch.syncOffsetMs.toFloat(),
+                                        onValueChange = { callbacks.onAudioSyncOffset(ch.id, it.toInt()) },
+                                        valueRange = -500f..500f,
+                                        modifier = Modifier.testTag("audio_sync_slider_${ch.id}")
+                                    )
+                                }
+                            }
                             Text(
                                 "Per-channel Noise Suppression, Gain, Noise Gate, Compressor, and Limiter are available via the Gear icon inside the Audio Mixer dock.",
                                 style = MaterialTheme.typography.bodySmall,
@@ -530,7 +564,9 @@ fun DiagnosticsAndProbesDialog(
     state: MobileLabsUiState,
     onDismiss: () -> Unit,
     onRunProbe: () -> Unit,
-    onExportZip: () -> Unit
+    onExportZip: () -> Unit,
+    onRecoverIncomplete: (String) -> Unit,
+    onDeleteIncomplete: (String) -> Unit
 ) {
     var tabIndex by remember { mutableIntStateOf(0) }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
@@ -605,10 +641,21 @@ fun DiagnosticsAndProbesDialog(
                             if (state.incompleteRecordings.isNotEmpty()) {
                                 item { Text("Interrupted / Incomplete Recordings", style = MaterialTheme.typography.titleSmall, color = StatusWarn) }
                                 items(state.incompleteRecordings) { inc ->
-                                    Surface(color = ObsWellBg, shape = RoundedCornerShape(4.dp), modifier = Modifier.fillMaxWidth()) {
-                                        Column(modifier = Modifier.padding(10.dp)) {
+                                    Surface(color = ObsWellBg, shape = RoundedCornerShape(4.dp), border = BorderStroke(1.dp, ObsBorder), modifier = Modifier.fillMaxWidth()) {
+                                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                             Text("${inc.fileName} · ${inc.statusNote}", style = MaterialTheme.typography.labelMedium, color = StatusWarn)
                                             Text("Size: ${inc.bytesOnDisk / 1024} KB · ${inc.filePath}", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
+                                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                OutlinedButton(
+                                                    onClick = { onRecoverIncomplete(inc.filePath) },
+                                                    enabled = inc.verifiedPlayable,
+                                                    modifier = Modifier.testTag("recover_recording_btn")
+                                                ) { Text("Recover to Library", color = if (inc.verifiedPlayable) StatusOk else StudioTextDim) }
+                                                TextButton(
+                                                    onClick = { onDeleteIncomplete(inc.filePath) },
+                                                    modifier = Modifier.testTag("delete_recording_btn")
+                                                ) { Text("Delete", color = ApertureRedHi) }
+                                            }
                                         }
                                     }
                                 }

@@ -9,4 +9,5 @@
     <string name="rotate_to_landscape_body">Mobile Labs is designed for 16:10 landscape. Any active stream, recording, or overlay continues running safely.</string>
     <string name="overlay_permission_title">Floating Aperture Control</string>
     <string name="overlay_permission_rationale">Allows Mobile Labs to show a compact draggable aperture button over your games so you can start or stop streaming and recording without leaving gameplay. Optional: you can always control outputs from the notification bar instead.</string>
+    <string name="overlay_next_scene">Next (%1$s)</string>
 </resources>

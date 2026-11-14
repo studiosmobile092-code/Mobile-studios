@@ -5,8 +5,11 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -14,6 +17,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -52,8 +56,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -66,12 +68,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlin.math.roundToInt
 import com.example.mobilelabs.model.AudioChannelState
 import com.example.mobilelabs.model.DockPanelId
 import com.example.mobilelabs.model.MobileLabsUiState
@@ -874,23 +883,18 @@ private fun ClassicObsAudioChannelRow(
         }
         ObsSegmentedMeterWithDbScale(
             peakDb = if (channel.muted || masterMuted) -60f else channel.peakDb,
+            peakHoldDb = if (channel.muted || masterMuted) -60f else channel.peakHoldDb,
             modifier = Modifier.fillMaxWidth().height(17.dp)
         )
         Row(
-            modifier = Modifier.fillMaxWidth().height(22.dp),
+            modifier = Modifier.fillMaxWidth().height(24.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Slider(
+            ObsHorizontalFader(
                 value = channel.volume,
-                onValueChange = { if (!channel.locked) onVolumeChange(it) },
-                valueRange = 0f..1.5f,
                 enabled = !channel.locked,
-                colors = SliderDefaults.colors(
-                    thumbColor = StudioText,
-                    activeTrackColor = ObsSliderBlue,
-                    inactiveTrackColor = Color(0xFF42424C)
-                ),
-                modifier = Modifier.weight(1f).height(20.dp)
+                onValueChange = onVolumeChange,
+                modifier = Modifier.weight(1f).padding(end = 6.dp)
             )
             IconButton(onClick = onToggleMute, modifier = Modifier.size(24.dp)) {
                 Icon(
@@ -919,8 +923,77 @@ private fun ClassicObsAudioChannelRow(
 }
 
 @Composable
-private fun ObsSegmentedMeterWithDbScale(peakDb: Float, modifier: Modifier = Modifier) {
+private fun ObsHorizontalFader(
+    value: Float,
+    enabled: Boolean,
+    onValueChange: (Float) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val maxVal = 1.5f
+    val clampedFraction = (value / maxVal).coerceIn(0f, 1f)
+    BoxWithConstraints(
+        modifier = modifier
+            .height(24.dp)
+            .semantics {
+                progressBarRangeInfo = ProgressBarRangeInfo(value, 0f..maxVal)
+            }
+            .pointerInput(enabled) {
+                if (!enabled) return@pointerInput
+                detectTapGestures { offset ->
+                    val frac = (offset.x / size.width.toFloat().coerceAtLeast(1f)).coerceIn(0f, 1f)
+                    onValueChange(frac * maxVal)
+                }
+            }
+            .pointerInput(enabled) {
+                if (!enabled) return@pointerInput
+                detectHorizontalDragGestures { change, _ ->
+                    change.consume()
+                    val frac = (change.position.x / size.width.toFloat().coerceAtLeast(1f)).coerceIn(0f, 1f)
+                    onValueChange(frac * maxVal)
+                }
+            },
+        contentAlignment = Alignment.CenterStart
+    ) {
+        val density = LocalDensity.current
+        val trackWpx = with(density) { maxWidth.toPx().coerceAtLeast(1f) }
+        val knobW = 10.dp
+        val knobWpx = with(density) { knobW.toPx() }
+        val usableWpx = (trackWpx - knobWpx).coerceAtLeast(1f)
+        val knobX = (clampedFraction * usableWpx).roundToInt()
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(4.dp)
+                .background(Color(0xFF42424C), RoundedCornerShape(2.dp))
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(clampedFraction)
+                .height(4.dp)
+                .background(
+                    if (enabled) ObsSliderBlue else ObsSliderBlue.copy(alpha = 0.45f),
+                    RoundedCornerShape(2.dp)
+                )
+        )
+        Box(
+            modifier = Modifier
+                .offset { IntOffset(knobX, 0) }
+                .size(width = knobW, height = 14.dp)
+                .background(if (enabled) StudioText else StudioTextDim, RoundedCornerShape(2.dp))
+                .border(1.dp, ObsBorder, RoundedCornerShape(2.dp))
+        )
+    }
+}
+
+@Composable
+private fun ObsSegmentedMeterWithDbScale(
+    peakDb: Float,
+    peakHoldDb: Float,
+    modifier: Modifier = Modifier
+) {
     val norm = ((peakDb + 60f) / 60f).coerceIn(0f, 1f)
+    val holdNorm = ((peakHoldDb + 60f) / 60f).coerceIn(0f, 1f)
     Column(modifier = modifier) {
         Canvas(modifier = Modifier.fillMaxWidth().height(6.dp).background(MeterTrack)) {
             val w = size.width
@@ -942,6 +1015,15 @@ private fun ObsSegmentedMeterWithDbScale(peakDb: Float, modifier: Modifier = Mod
             }
             if (activeW > yellowEnd) {
                 drawRect(color = MeterRed, topLeft = Offset(yellowEnd, 0f), size = Size(activeW - yellowEnd, h))
+            }
+            if (peakHoldDb > -59f) {
+                val holdX = (holdNorm * (w - 2.dp.toPx())).coerceIn(0f, (w - 2.dp.toPx()).coerceAtLeast(0f))
+                val holdColor = when {
+                    holdNorm > 0.86f -> MeterRed
+                    holdNorm > 0.68f -> MeterYellow
+                    else -> Color.White
+                }
+                drawRect(color = holdColor, topLeft = Offset(holdX, 0f), size = Size(2.dp.toPx(), h))
             }
         }
         // Classic OBS dB scale tick marks (-60 -50 -40 -30 -20 -15 -10 -5 0)

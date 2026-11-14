@@ -282,7 +282,7 @@ class FloatingApertureOverlay(
         }
         micMuteBtn?.text = if (currentMicMuted) "Mic: OFF" else "Mic: ON"
         gameMuteBtn?.text = if (currentGameMuted) "Game: OFF" else "Game: ON"
-        sceneBtn?.text = "Next (${currentSceneName.take(8)})"
+        sceneBtn?.text = context.getString(R.string.overlay_next_scene, currentSceneName.take(8))
         presetBtn?.text = if (currentPresetId == PresetId.LOW_OVERHEAD) "Low 30fps" else "Bal 60fps"
     }
 

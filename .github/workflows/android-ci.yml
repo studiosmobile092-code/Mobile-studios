@@ -6,10 +6,30 @@ on:
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
+    inputs:
+      build_variant:
+        description: 'APK & XAPK variant to build'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - debug
+          - release
+      package_xapk:
+        description: 'Also package installable .xapk archive'
+        required: true
+        default: true
+        type: boolean
+      build_native_libobs:
+        description: 'Also build arm64-v8a native libobs APK + XAPK'
+        required: true
+        default: true
+        type: boolean
 
 jobs:
   build-android-apk:
-    name: Build, Test & Package Installable Debug APK
+    name: Test, Lint & Package APK / XAPK
     runs-on: ubuntu-latest
 
     steps:
@@ -34,7 +54,12 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Ensure debug.keystore exists for clean checkout signing
+      - name: Prepare Debug & Release Keystores
+        shell: bash
+        env:
+          SECRET_KS_B64: ${{ secrets.KEYSTORE_B64 }}
+          SECRET_STORE_PASS: ${{ secrets.STORE_PASSWORD }}
+          SECRET_KEY_PASS: ${{ secrets.KEY_PASSWORD }}
         run: |
           if [ ! -f debug.keystore ]; then
             keytool -genkeypair -v -keystore debug.keystore \
@@ -43,33 +68,86 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      - name: Run All Unit & Robolectric Tests (Phase 1-3)
+          UPLOAD_KS="${RUNNER_TEMP}/upload-keystore.jks"
+          if [ -n "$SECRET_KS_B64" ] && [ -n "$SECRET_STORE_PASS" ] && [ -n "$SECRET_KEY_PASS" ]; then
+            echo "$SECRET_KS_B64" | base64 --decode > "$UPLOAD_KS"
+            echo "KEYSTORE_PATH=$UPLOAD_KS" >> "$GITHUB_ENV"
+            echo "STORE_PASSWORD=$SECRET_STORE_PASS" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$SECRET_KEY_PASS" >> "$GITHUB_ENV"
+          else
+            CI_PASS="mobilelabs-ci-upload"
+            rm -f "$UPLOAD_KS"
+            keytool -genkeypair -v -keystore "$UPLOAD_KS" \
+              -storepass "$CI_PASS" -alias upload -keypass "$CI_PASS" \
+              -keyalg RSA -keysize 2048 -validity 3650 \
+              -dname "CN=Mobile Labs CI,O=Mobile Labs,C=US"
+            echo "KEYSTORE_PATH=$UPLOAD_KS" >> "$GITHUB_ENV"
+            echo "STORE_PASSWORD=$CI_PASS" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$CI_PASS" >> "$GITHUB_ENV"
+          fi
+
+      - name: Extract App Version Metadata
+        id: ver
+        run: |
+          VCODE="$(grep -E 'versionCode\s*=' app/build.gradle.kts | head -n1 | sed -E 's/.*=\s*([0-9]+).*/\1/')"
+          VNAME="$(grep -E 'versionName\s*=' app/build.gradle.kts | head -n1 | sed -E 's/.*=\s*"([^"]+)".*/\1/')"
+          echo "code=${VCODE:-3}" >> "$GITHUB_OUTPUT"
+          echo "name=${VNAME:-1.0.0-rc1}" >> "$GITHUB_OUTPUT"
+
+      - name: Run All Unit & Robolectric Tests
         run: gradle :app:testDebugUnitTest --no-daemon
 
       - name: Run Android Lint
         run: gradle :app:lintDebug --no-daemon
 
-      - name: Assemble Debug APK
-        run: gradle :app:assembleDebug --no-daemon
-
-      - name: Verify APK & Record SHA-256
+      - name: Assemble Debug APK & Package XAPK
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_variant != 'release' }}
         run: |
+          gradle :app:assembleDebug --no-daemon
+          mkdir -p dist/debug
           APK="app/build/outputs/apk/debug/app-debug.apk"
           test -f "$APK"
-          sha256sum "$APK" | tee apk-sha256.txt
+          cp "$APK" dist/debug/mobile-labs-debug.apk
+          if [ "${{ inputs.package_xapk }}" != "false" ]; then
+            chmod +x scripts/package_xapk.sh
+            bash scripts/package_xapk.sh "$APK" "${{ steps.ver.outputs.code }}" "${{ steps.ver.outputs.name }}" "dist/debug/mobile-labs-debug.xapk"
+          fi
+          sha256sum dist/debug/* | tee dist/debug/sha256.txt
 
-      - name: Upload Installable APK Artifact
+      - name: Assemble Release APK & Package XAPK
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_variant != 'debug' }}
+        run: |
+          gradle :app:assembleRelease --no-daemon
+          mkdir -p dist/release
+          APK="app/build/outputs/apk/release/app-release.apk"
+          test -f "$APK"
+          cp "$APK" dist/release/mobile-labs-release.apk
+          if [ "${{ inputs.package_xapk }}" != "false" ]; then
+            chmod +x scripts/package_xapk.sh
+            bash scripts/package_xapk.sh "$APK" "${{ steps.ver.outputs.code }}" "${{ steps.ver.outputs.name }}" "dist/release/mobile-labs-release.xapk"
+          fi
+          sha256sum dist/release/* | tee dist/release/sha256.txt
+
+      - name: Upload Debug APK & XAPK Artifact
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_variant != 'release' }}
         uses: actions/upload-artifact@v4
         with:
-          name: mobile-labs-debug-apk
-          path: |
-            app/build/outputs/apk/debug/app-debug.apk
-            apk-sha256.txt
+          name: mobile-labs-debug-apk-xapk
+          path: dist/debug/*
+          retention-days: 30
+
+      - name: Upload Release APK & XAPK Artifact
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_variant != 'debug' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-labs-release-apk-xapk
+          path: dist/release/*
           retention-days: 30
 
   build-native-libobs-apk:
-    name: Native libobs arm64-v8a NDK Build (Upstream Pinned)
+    name: Native libobs arm64-v8a NDK Build (APK + XAPK)
     runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_native_libobs == true }}
     continue-on-error: true
 
     steps:
@@ -96,7 +174,7 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Install Ninja & pkg-config
+      - name: Install Ninja, pkg-config & build tools
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build pkg-config git
@@ -110,11 +188,20 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
+      - name: Extract App Version Metadata
+        id: ver
+        run: |
+          VCODE="$(grep -E 'versionCode\s*=' app/build.gradle.kts | head -n1 | sed -E 's/.*=\s*([0-9]+).*/\1/')"
+          VNAME="$(grep -E 'versionName\s*=' app/build.gradle.kts | head -n1 | sed -E 's/.*=\s*"([^"]+)".*/\1/')"
+          echo "code=${VCODE:-3}" >> "$GITHUB_OUTPUT"
+          echo "name=${VNAME:-1.0.0-rc1}" >> "$GITHUB_OUTPUT"
+
       - name: Cache pinned libobs third_party build
         uses: actions/cache@v4
         with:
           path: |
             app/src/main/cpp/prebuilt/arm64-v8a
+            app/src/main/cpp/jniLibs/arm64-v8a
             app/src/main/cpp/third_party/obs-studio
           key: libobs-57bfcf10a-arm64-${{ hashFiles('scripts/fetch_and_build_obs.sh', 'app/src/main/cpp/CMakeLists.txt') }}
 
@@ -125,15 +212,24 @@ jobs:
           chmod +x scripts/fetch_and_build_obs.sh
           bash scripts/fetch_and_build_obs.sh
 
-      - name: Assemble Native libobs Debug APK (arm64-v8a)
+      - name: Assemble Native libobs Debug APK & XAPK (arm64-v8a)
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/27.2.12479018
-        run: gradle :app:assembleDebug -PwithLibObs=true --no-daemon
+        run: |
+          gradle :app:assembleDebug -PwithLibObs=true --no-daemon
+          mkdir -p dist/native
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          test -f "$APK"
+          cp "$APK" dist/native/mobile-labs-libobs-arm64-v8a.apk
+          if [ "${{ inputs.package_xapk }}" != "false" ]; then
+            chmod +x scripts/package_xapk.sh
+            bash scripts/package_xapk.sh "$APK" "${{ steps.ver.outputs.code }}" "${{ steps.ver.outputs.name }}" "dist/native/mobile-labs-libobs-arm64-v8a.xapk"
+          fi
+          sha256sum dist/native/* | tee dist/native/sha256.txt
 
-      - name: Upload Native libobs APK Artifact
+      - name: Upload Native libobs APK & XAPK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: mobile-labs-libobs-arm64-v8a
-          path: |
-            app/build/outputs/apk/debug/app-debug.apk
+          path: dist/native/*
           retention-days: 30

@@ -1,6 +1,7 @@
 package com.example.mobilelabs.model
 
 import android.os.PowerManager
+import androidx.compose.runtime.Immutable
 
 enum class EngineBackendStatus(val label: String, val isLibObsLoaded: Boolean) {
     LIBOBS_NATIVE("libobs JNI + GLES3/MediaCodec", true),
@@ -214,6 +215,7 @@ data class BenchmarkRecord(
     val recordedAtIso: String
 )
 
+@Immutable
 data class VideoConfig(
     val presetId: PresetId = PresetId.BALANCED,
     val canvasWidth: Int = 1280,
@@ -232,6 +234,7 @@ data class VideoConfig(
     val lowLatencyNetworkMode: Boolean = true
 )
 
+@Immutable
 data class SourceTransform(
     val xFraction: Float = 0f,
     val yFraction: Float = 0f,
@@ -244,6 +247,7 @@ data class SourceTransform(
     val cropBottom: Float = 0f
 )
 
+@Immutable
 data class SourceModel(
     val id: String,
     val name: String,
@@ -265,12 +269,14 @@ data class SourceModel(
     val videoFilters: VideoFilterConfig = VideoFilterConfig()
 )
 
+@Immutable
 data class SceneModel(
     val id: String,
     val name: String,
     val sources: List<SourceModel>
 )
 
+@Immutable
 data class SceneCollection(
     val id: String = "col_default",
     val name: String = "Tab A9+ Gaming",
@@ -291,6 +297,7 @@ data class AppProfile(
     val swapPreviewProgramOnTake: Boolean = true
 )
 
+@Immutable
 data class AudioChannelState(
     val id: String,
     val label: String,
@@ -298,6 +305,8 @@ data class AudioChannelState(
     val muted: Boolean = false,
     val locked: Boolean = false,
     val peakDb: Float = -60f,
+    val peakHoldDb: Float = -60f,
+    val syncOffsetMs: Int = 0,
     val isClipping: Boolean = false,
     val activeRouteLabel: String = "Default",
     val unavailableReason: String? = null,
@@ -405,6 +414,7 @@ data class DeviceAndCodecReport(
     val rawJson: String
 )
 
+@Immutable
 data class MobileLabsUiState(
     val engineBackend: EngineBackendStatus = EngineBackendStatus.ANDROID_HARDWARE_PIPELINE,
     val libObsVersion: String = "32.2.1 (commit 57bfcf10a)",

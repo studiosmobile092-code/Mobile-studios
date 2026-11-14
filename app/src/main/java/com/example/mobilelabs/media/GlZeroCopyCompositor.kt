@@ -1,5 +1,6 @@
 package com.example.mobilelabs.media
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -15,11 +16,14 @@ import android.opengl.EGLSurface
 import android.opengl.GLES11Ext
 import android.opengl.GLES30
 import android.opengl.GLUtils
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.PerformanceHintManager
 import android.os.Process
 import android.os.SystemClock
 import android.view.Surface
+import androidx.core.graphics.createBitmap
 import com.example.mobilelabs.model.LutPreset
 import com.example.mobilelabs.model.SceneModel
 import com.example.mobilelabs.model.ScreenFitMode
@@ -53,7 +57,7 @@ import kotlin.math.sin
  * - 5 Transitions (Cut, Fade, Slide, Swipe, Fade-to-Color)
  * - Preview paused immediately on ON_STOP (Iron Rule R9)
  */
-class GlZeroCopyCompositor {
+class GlZeroCopyCompositor(private val appContext: Context? = null) {
 
     data class CompositorStats(
         val captureCadenceFps: Float,
@@ -171,6 +175,9 @@ class GlZeroCopyCompositor {
         android.opengl.Matrix.setIdentityM(this, 0)
     }
 
+    private var adpfSession: PerformanceHintManager.Session? = null
+    private var adpfLastTargetNs: Long = 0L
+
     private val tickRunnable = object : Runnable {
         override fun run() {
             if (!running.get()) return
@@ -180,6 +187,17 @@ class GlZeroCopyCompositor {
             val framePeriodNs = 1_000_000_000L / max(1, cfg.fps)
             val elapsedNs = SystemClock.elapsedRealtimeNanos() - tickStartNs
             lastPassMicros.set(elapsedNs / 1000L)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                adpfSession?.let { sess ->
+                    runCatching {
+                        if (framePeriodNs != adpfLastTargetNs) {
+                            sess.updateTargetWorkDuration(framePeriodNs)
+                            adpfLastTargetNs = framePeriodNs
+                        }
+                        sess.reportActualWorkDuration(elapsedNs.coerceAtLeast(1_000L))
+                    }
+                }
+            }
             if (elapsedNs > framePeriodNs * 2) {
                 renderSkippedCount.incrementAndGet()
             }
@@ -209,6 +227,14 @@ class GlZeroCopyCompositor {
         glHandler = handler
 
         handler.post {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && appContext != null) {
+                runCatching {
+                    val mgr = appContext.getSystemService(PerformanceHintManager::class.java)
+                    val targetNs = 1_000_000_000L / max(1, videoConfig.fps)
+                    adpfLastTargetNs = targetNs
+                    adpfSession = mgr?.createHintSession(intArrayOf(Process.myTid()), targetNs)
+                }
+            }
             initEglAndPrograms()
             createInputTextures()
             val screenSurf = screenInputSurface
@@ -1033,7 +1059,7 @@ class GlZeroCopyCompositor {
         val totalHeight = (lineHeight * lines.size + pad * 2).coerceIn(48, 720)
         val totalWidth = (textWidth + pad * 2).coerceIn(96, 1280)
 
-        val bmp = Bitmap.createBitmap(totalWidth, totalHeight, Bitmap.Config.ARGB_8888)
+        val bmp = createBitmap(totalWidth, totalHeight, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
         canvas.drawColor(src.textBgColorArgb.toInt())
         var y = pad - paint.fontMetrics.ascent
@@ -1142,5 +1168,9 @@ class GlZeroCopyCompositor {
         }
         eglContext = null
         eglDisplay = null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            runCatching { adpfSession?.close() }
+        }
+        adpfSession = null
     }
 }

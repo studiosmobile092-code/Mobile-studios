@@ -138,6 +138,7 @@ data class WorkspaceCallbacks(
     val onAudioMute: (String) -> Unit,
     val onAudioLock: (String) -> Unit,
     val onUpdateAudioFilters: (String, AudioFilterConfig) -> Unit,
+    val onAudioSyncOffset: (String, Int) -> Unit,
     val onMasterMute: () -> Unit,
     val onTransitionChange: (TransitionType, Int) -> Unit,
     val onToggleStudioMode: () -> Unit,
@@ -160,6 +161,8 @@ data class WorkspaceCallbacks(
     val onDeleteBenchmarkRecord: (String) -> Unit,
     val onPickRecordingFolder: () -> Unit,
     val onResetRecordingFolder: () -> Unit,
+    val onRecoverIncompleteRecording: (String) -> Unit,
+    val onDeleteIncompleteRecording: (String) -> Unit,
     val onCreateProfile: (String) -> Unit,
     val onSelectProfile: (String) -> Unit,
     val onDeleteProfile: (String) -> Unit,
@@ -378,7 +381,8 @@ fun WorkspaceScreen(
                 onExportObsJson = callbacks.onExportObsJson,
                 onImportObsJson = callbacks.onImportObsJson,
                 onRequestEnableOverlay = callbacks.onRequestEnableOverlay,
-                onOpenAboutLicenses = { showSettings = false; showAboutLicenses = true }
+                onOpenAboutLicenses = { showSettings = false; showAboutLicenses = true },
+                onAudioSyncOffset = callbacks.onAudioSyncOffset
             )
         )
     }
@@ -388,7 +392,9 @@ fun WorkspaceScreen(
             state = state,
             onDismiss = { showDiagnostics = false },
             onRunProbe = callbacks.onRunProbe,
-            onExportZip = callbacks.onExportDiagnostics
+            onExportZip = callbacks.onExportDiagnostics,
+            onRecoverIncomplete = callbacks.onRecoverIncompleteRecording,
+            onDeleteIncomplete = callbacks.onDeleteIncompleteRecording
         )
     }
 
@@ -788,6 +794,7 @@ private fun ObsPreviewStage(
                         multiSelectedIds = multiSelectedSourceIds,
                         activeTool = activeTool,
                         isTouchBlockedLive = isTouchBlockedLive,
+                        screenFitMode = state.videoConfig.screenFitMode,
                         onSelectSource = callbacks.onSelectSource,
                         onUnlockLiveTouch = callbacks.onUnlockLiveTouch,
                         onDragSourceTransform = callbacks.onDragSourceTransform,

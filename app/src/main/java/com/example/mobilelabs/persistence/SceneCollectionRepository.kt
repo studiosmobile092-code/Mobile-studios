@@ -56,6 +56,7 @@ class SceneCollectionRepository(private val context: Context) {
         val swapPreviewProgramOnTake: Boolean = true,
         val lockPreviewTouchWhileLive: Boolean = true,
         val audioFilters: Map<String, AudioFilterConfig> = emptyMap(),
+        val audioSyncOffsetsMs: Map<String, Int> = emptyMap(),
         val profiles: List<AppProfile> = listOf(AppProfile()),
         val activeProfileId: String = "prof_default",
         val savedCollections: List<String> = listOf("Tab A9+ Gaming"),
@@ -315,6 +316,11 @@ class SceneCollectionRepository(private val context: Context) {
                     put(chId, encodeAudioFilter(f))
                 }
             })
+            put("audioSyncOffsetsMs", JSONObject().apply {
+                settings.audioSyncOffsetsMs.forEach { (chId, ms) ->
+                    put(chId, ms)
+                }
+            })
             put("profiles", JSONArray().apply {
                 settings.profiles.forEach { p ->
                     put(JSONObject().apply {
@@ -394,6 +400,13 @@ class SceneCollectionRepository(private val context: Context) {
                 }
             }
 
+            val audioSyncMap = mutableMapOf<String, Int>()
+            obj.optJSONObject("audioSyncOffsetsMs")?.let { asObj ->
+                asObj.keys().forEach { k ->
+                    audioSyncMap[k] = asObj.optInt(k, 0).coerceIn(-500, 500)
+                }
+            }
+
             PersistedSettings(
                 videoConfig = videoConfig,
                 floatingOverlayEnabled = obj.optBoolean("floatingOverlayEnabled", false),
@@ -406,6 +419,7 @@ class SceneCollectionRepository(private val context: Context) {
                 swapPreviewProgramOnTake = obj.optBoolean("swapPreviewProgramOnTake", true),
                 lockPreviewTouchWhileLive = obj.optBoolean("lockPreviewTouchWhileLive", true),
                 audioFilters = audioFiltersMap,
+                audioSyncOffsetsMs = audioSyncMap,
                 profiles = profilesList,
                 activeProfileId = obj.optString("activeProfileId", profilesList.first().id),
                 savedCollections = listSavedCollectionNames(),

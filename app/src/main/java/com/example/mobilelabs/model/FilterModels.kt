@@ -1,10 +1,13 @@
 package com.example.mobilelabs.model
 
+import androidx.compose.runtime.Immutable
+
 /**
  * Audio & Video filter configurations (M2.3).
  * All filters are OFF by default (Spec §12.2 M2.3 Gate) and execute strictly on the
  * audio DSP path or GLES3 GPU fragment shader (zero CPU pixel copies).
  */
+@Immutable
 data class AudioFilterConfig(
     val gainEnabled: Boolean = false,
     val gainDb: Float = 0f,
@@ -48,6 +51,7 @@ enum class ScaleFilterType(val label: String) {
     POINT("Pixel / Nearest")
 }
 
+@Immutable
 data class VideoFilterConfig(
     val colorCorrectionEnabled: Boolean = false,
     val brightness: Float = 0f, // -0.5f..0.5f
@@ -84,8 +88,8 @@ data class VideoFilterConfig(
 }
 
 enum class RecordingFormat(val label: String, val extension: String) {
-    FMP4("Fragmented MP4", "mp4"),
-    MKV("Matroska (MKV → MP4)", "mkv")
+    FMP4("MP4 (Crash-Safe Checkpoint)", "mp4"),
+    SEGMENTED_MP4("Segmented MP4 (10m Split)", "mp4")
 }
 
 enum class DownscaleFilter(val label: String) {

@@ -6,13 +6,15 @@ import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest
 import android.os.Handler
 import android.os.HandlerThread
+import android.util.Range
 import android.view.Surface
 
 /**
  * Lightweight Camera2 controller for facecam overlay (§6.4).
- * Targets ≤ 720p30 (never sensor maximum while gaming) and renders directly to the
+ * Targets <= 30 fps (never sensor maximum while gaming) and renders directly to the
  * GLES compositor's SurfaceTexture input Surface.
  */
 class Camera2SourceController(
@@ -34,6 +36,7 @@ class Camera2SourceController(
             return
         }
 
+        val cappedRange = selectMax30FpsRange(camId)
         val t = HandlerThread("MobileLabs-Camera2").apply { start() }
         thread = t
         val h = Handler(t.looper)
@@ -43,7 +46,7 @@ class Camera2SourceController(
             cameraManager.openCamera(camId, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
                     cameraDevice = camera
-                    startRepeatingSession(camera, targetSurface)
+                    startRepeatingSession(camera, targetSurface, cappedRange)
                 }
 
                 override fun onDisconnected(camera: CameraDevice) {
@@ -63,10 +66,17 @@ class Camera2SourceController(
         }
     }
 
-    private fun startRepeatingSession(camera: CameraDevice, targetSurface: Surface) {
+    private fun startRepeatingSession(
+        camera: CameraDevice,
+        targetSurface: Surface,
+        fpsRange: Range<Int>?
+    ) {
         try {
             val req = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                 addTarget(targetSurface)
+                if (fpsRange != null) {
+                    set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
+                }
             }
             @Suppress("DEPRECATION")
             camera.createCaptureSession(
@@ -88,6 +98,16 @@ class Camera2SourceController(
         } catch (e: Throwable) {
             onCameraError("Camera2 preview start failed: ${e.message}")
         }
+    }
+
+    private fun selectMax30FpsRange(camId: String): Range<Int>? {
+        return runCatching {
+            val ranges = cameraManager.getCameraCharacteristics(camId)
+                .get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                ?.filter { it.upper <= 30 }
+                .orEmpty()
+            ranges.maxWithOrNull(compareBy<Range<Int>> { it.upper }.thenBy { it.lower })
+        }.getOrNull()
     }
 
     fun stop() {

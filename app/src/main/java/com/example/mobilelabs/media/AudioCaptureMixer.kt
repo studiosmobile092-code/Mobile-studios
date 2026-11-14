@@ -27,6 +27,34 @@ import kotlin.math.sqrt
 import kotlin.math.tanh
 
 /**
+ * Pre-allocated circular stereo PCM delay line for OBS-grade per-channel audio sync (-500..+500 ms).
+ */
+class AudioDelayRingBuffer(maxSamples: Int = 48000 * 2) {
+    private val ring = FloatArray(maxSamples.coerceAtLeast(2048))
+    private var writePos = 0
+
+    fun reset() {
+        ring.fill(0f)
+        writePos = 0
+    }
+
+    fun applyDelayInPlace(buf: FloatArray, sampleCount: Int, delayMs: Int, sampleRateHz: Int = 48000) {
+        val delaySamples = ((delayMs.coerceIn(0, 500) * sampleRateHz) / 1000) * 2
+        val cap = ring.size
+        val clampedDelay = delaySamples.coerceIn(0, cap - 2)
+        for (i in 0 until sampleCount) {
+            val incoming = buf[i]
+            ring[writePos] = incoming
+            val readPos = (writePos - clampedDelay + cap) % cap
+            if (clampedDelay > 0) {
+                buf[i] = ring[readPos]
+            }
+            writePos = (writePos + 1) % cap
+        }
+    }
+}
+
+/**
  * Zero-allocation inline PCM DSP filter processor (M2.3).
  * Executes on pre-allocated float buffers inside the audio mixer thread.
  * All filters default to OFF and bypass immediately with zero math cost when disabled.
@@ -60,12 +88,10 @@ class AudioDspProcessor(private val sampleRateHz: Int = 48000) {
         while (i < sampleCount) {
             var s = buf[i]
 
-            // 1) Gain filter
             if (cfg.gainEnabled) {
                 s *= gainLin
             }
 
-            // 2) High-pass filter stage for Noise Suppression (paired with OS NoiseSuppressor on mic)
             if (cfg.noiseSuppressionEnabled) {
                 if ((i and 1) == 0) {
                     val out = hpfAlpha * (hpfPrevOutL + s - hpfPrevInL)
@@ -82,7 +108,6 @@ class AudioDspProcessor(private val sampleRateHz: Int = 48000) {
 
             val mag = abs(s)
 
-            // 3) Noise Gate with hysteresis
             if (cfg.noiseGateEnabled) {
                 val targetGate = when {
                     mag >= gateOpenLin -> 1f
@@ -94,7 +119,6 @@ class AudioDspProcessor(private val sampleRateHz: Int = 48000) {
                 s *= gateEnvelope
             }
 
-            // 4) Dynamic Compressor
             if (cfg.compressorEnabled) {
                 val envCoeff = if (mag > compEnvelope) 0.01f else 0.0008f
                 compEnvelope += (mag - compEnvelope) * envCoeff
@@ -108,7 +132,6 @@ class AudioDspProcessor(private val sampleRateHz: Int = 48000) {
                 }
             }
 
-            // 5) Peak Limiter
             if (cfg.limiterEnabled && abs(s) > limiterLin && limiterLin > 0.001f) {
                 val sign = if (s >= 0f) 1f else -1f
                 val excess = abs(s) - limiterLin
@@ -126,12 +149,10 @@ class AudioDspProcessor(private val sampleRateHz: Int = 48000) {
 }
 
 /**
- * 48 kHz stereo audio capture, DSP filter chain, & mixing engine (§7, M2.3):
- * - Game/system audio via AudioPlaybackCapture (with honest silence/unavailable detection)
- * - Microphone via AudioRecord + optional Android NoiseSuppressor API
- * - Per-channel zero-allocation DSP (Gain, Noise Suppression, Noise Gate, Compressor, Limiter)
- * - Master soft-limiter to prevent clipping
- * - Live AudioDeviceCallback tracking for Wired / USB / Bluetooth / Speaker routing
+ * 48 kHz stereo non-blocking audio capture, sync-offset delay line, DSP filter chain, & mixing engine (§7, M2.3):
+ * - Non-blocking AudioRecord.READ_NON_BLOCKING reads so silent system audio never stalls microphone capture
+ * - Per-channel sync offset (-500..+500 ms) computed cleanly without blocking
+ * - Decaying peak-hold dB meter markers alongside live RMS dB
  */
 class AudioCaptureMixer(
     private val context: Context,
@@ -148,11 +169,15 @@ class AudioCaptureMixer(
 
     private val gameDsp = AudioDspProcessor(48000)
     private val micDsp = AudioDspProcessor(48000)
+    private val gameDelayBuffer = AudioDelayRingBuffer()
+    private val micDelayBuffer = AudioDelayRingBuffer()
 
     @Volatile var gameVolume = 1.0f
     @Volatile var gameMuted = false
+    @Volatile var gameSyncOffsetMs = 0
     @Volatile var micVolume = 1.0f
     @Volatile var micMuted = false
+    @Volatile var micSyncOffsetMs = 0
     @Volatile var masterMuted = false
 
     @Volatile var gameFilters = AudioFilterConfig()
@@ -165,6 +190,10 @@ class AudioCaptureMixer(
     @Volatile var gamePeakDb = -60f
         private set
     @Volatile var micPeakDb = -60f
+        private set
+    @Volatile var gamePeakHoldDb = -60f
+        private set
+    @Volatile var micPeakHoldDb = -60f
         private set
     @Volatile var gameClipping = false
         private set
@@ -182,6 +211,9 @@ class AudioCaptureMixer(
         private set
     @Volatile var lastAudioDspMicros: Long = 0L
         private set
+
+    private var gamePeakHoldAtMs = 0L
+    private var micPeakHoldAtMs = 0L
 
     private val deviceCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
@@ -201,6 +233,8 @@ class AudioCaptureMixer(
         if (running.getAndSet(true)) return
         audioManager.registerAudioDeviceCallback(deviceCallback, null)
         refreshRoutes()
+        gameDelayBuffer.reset()
+        micDelayBuffer.reset()
 
         val sampleRate = 48000
         val minBuf = AudioRecord.getMinBufferSize(
@@ -297,24 +331,26 @@ class AudioCaptureMixer(
 
             val pRec = playbackRecord
             if (pRec != null) {
-                gameRead = pRec.read(gameBuf, 0, frameSamples)
-                if (gameRead < 0) {
+                val n = pRec.read(gameBuf, 0, frameSamples, AudioRecord.READ_NON_BLOCKING)
+                if (n < 0) {
                     gameUnavailableReason = "System audio stream closed"
-                    gameRead = 0
+                } else {
+                    gameRead = n
                 }
             }
 
             val mRec = micRecord
             if (mRec != null) {
-                micRead = mRec.read(micBuf, 0, frameSamples)
-                if (micRead < 0) {
+                val n = mRec.read(micBuf, 0, frameSamples, AudioRecord.READ_NON_BLOCKING)
+                if (n < 0) {
                     micUnavailableReason = "Microphone taken by another app"
-                    micRead = 0
+                } else {
+                    micRead = n
                 }
             }
 
             if (gameRead == 0 && micRead == 0) {
-                SystemClock.sleep(15)
+                SystemClock.sleep(10)
                 continue
             }
 
@@ -338,6 +374,14 @@ class AudioCaptureMixer(
                 gameFloatBuf[i] = if (gMuted) 0f else (gRaw / 32768f) * gVol
                 micFloatBuf[i] = if (mMuted) 0f else (mRaw / 32768f) * mVol
             }
+
+            // Negative mic sync offset delays game audio; positive sync offset delays that channel cleanly.
+            val gOff = gameSyncOffsetMs
+            val mOff = micSyncOffsetMs
+            val effGameDelayMs = (gOff - min(0, mOff)).coerceIn(0, 500)
+            val effMicDelayMs = (mOff - min(0, gOff)).coerceIn(0, 500)
+            gameDelayBuffer.applyDelayInPlace(gameFloatBuf, count, effGameDelayMs, 48000)
+            micDelayBuffer.applyDelayInPlace(micFloatBuf, count, effMicDelayMs, 48000)
 
             val gFilters = gameFilters
             if (!gMuted && gFilters.anyActive()) {
@@ -366,8 +410,19 @@ class AudioCaptureMixer(
             }
             lastAudioDspMicros = (System.nanoTime() - dspStartNs) / 1000L
 
-            gamePeakDb = toDb(sqrt(gameRmsSum / max(1, count)).toFloat())
-            micPeakDb = toDb(sqrt(micRmsSum / max(1, count)).toFloat())
+            val nowMs = SystemClock.elapsedRealtime()
+            val gDb = toDb(sqrt(gameRmsSum / max(1, count)).toFloat())
+            val mDb = toDb(sqrt(micRmsSum / max(1, count)).toFloat())
+            gamePeakDb = gDb
+            micPeakDb = mDb
+            if (gDb >= gamePeakHoldDb || nowMs - gamePeakHoldAtMs > 1500L) {
+                gamePeakHoldDb = if (gDb >= gamePeakHoldDb) gDb else (gamePeakHoldDb - 1.5f).coerceAtLeast(gDb)
+                if (gDb >= gamePeakHoldDb) gamePeakHoldAtMs = nowMs
+            }
+            if (mDb >= micPeakHoldDb || nowMs - micPeakHoldAtMs > 1500L) {
+                micPeakHoldDb = if (mDb >= micPeakHoldDb) mDb else (micPeakHoldDb - 1.5f).coerceAtLeast(mDb)
+                if (mDb >= micPeakHoldDb) micPeakHoldAtMs = nowMs
+            }
             gameClipping = gameMaxAbs >= 32600 && !gameMuted
             micClipping = micMaxAbs >= 32600 && !micMuted
 
@@ -393,6 +448,8 @@ class AudioCaptureMixer(
                 volume = gameVolume,
                 muted = gameMuted,
                 peakDb = if (gameMuted || masterMuted) -60f else gamePeakDb,
+                peakHoldDb = if (gameMuted || masterMuted) -60f else gamePeakHoldDb,
+                syncOffsetMs = gameSyncOffsetMs,
                 isClipping = gameClipping,
                 activeRouteLabel = activePlaybackRoute,
                 unavailableReason = gameUnavailableReason,
@@ -405,6 +462,8 @@ class AudioCaptureMixer(
                 volume = micVolume,
                 muted = micMuted,
                 peakDb = if (micMuted || masterMuted) -60f else micPeakDb,
+                peakHoldDb = if (micMuted || masterMuted) -60f else micPeakHoldDb,
+                syncOffsetMs = micSyncOffsetMs,
                 isClipping = micClipping,
                 activeRouteLabel = activeMicRoute,
                 unavailableReason = micUnavailableReason,
@@ -429,8 +488,12 @@ class AudioCaptureMixer(
         runCatching { micRecord?.stop(); micRecord?.release() }
         playbackRecord = null
         micRecord = null
+        gameDelayBuffer.reset()
+        micDelayBuffer.reset()
         gamePeakDb = -60f
         micPeakDb = -60f
+        gamePeakHoldDb = -60f
+        micPeakHoldDb = -60f
         lastAudioDspMicros = 0L
     }
 

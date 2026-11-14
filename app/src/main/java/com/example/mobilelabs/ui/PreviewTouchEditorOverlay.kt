@@ -16,8 +16,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.RotateRight
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.example.mobilelabs.model.PreviewTool
 import com.example.mobilelabs.model.SceneModel
+import com.example.mobilelabs.model.ScreenFitMode
 import com.example.mobilelabs.model.SourceModel
 import com.example.ui.theme.ApertureRed
 import com.example.ui.theme.ApertureRedHi
@@ -55,6 +56,7 @@ fun PreviewTouchEditorOverlay(
     multiSelectedIds: Set<String>,
     activeTool: PreviewTool,
     isTouchBlockedLive: Boolean,
+    screenFitMode: ScreenFitMode = ScreenFitMode.CROP_TO_FILL,
     onSelectSource: (String) -> Unit,
     onUnlockLiveTouch: () -> Unit,
     onDragSourceTransform: (
@@ -94,6 +96,24 @@ fun PreviewTouchEditorOverlay(
                     }
                 }
         )
+
+        // 16:9 safe-crop guide lines when capturing 16:10 tablet display in CROP_TO_FILL mode
+        if (screenFitMode == ScreenFitMode.CROP_TO_FILL) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = maxHeight * 0.05f)
+                    .size(width = maxWidth, height = 1.dp)
+                    .background(Color.White.copy(alpha = 0.22f))
+            )
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = maxHeight * 0.05f)
+                    .size(width = maxWidth, height = 1.dp)
+                    .background(Color.White.copy(alpha = 0.22f))
+            )
+        }
 
         // Snap guide crosshairs when selected source sits near center
         if (selectedSrc != null && !selectedSrc.locked && !isTouchBlockedLive) {
@@ -230,7 +250,7 @@ fun PreviewTouchEditorOverlay(
                                 }
                         ) {
                             Icon(
-                                Icons.Default.RotateRight,
+                                Icons.AutoMirrored.Filled.RotateRight,
                                 contentDescription = "Rotate source",
                                 tint = StudioText,
                                 modifier = Modifier.padding(3.dp)
