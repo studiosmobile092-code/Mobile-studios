@@ -115,8 +115,16 @@ class HardwareMediaPipeline(
     private var audioEncoder: MediaCodec? = null
     private var audioDrainThread: Thread? = null
 
+    @Volatile private var multiTrackActive = false
+    private var micAudioEncoder: MediaCodec? = null
+    private var micAudioDrainThread: Thread? = null
+    private var gameAudioEncoder: MediaCodec? = null
+    private var gameAudioDrainThread: Thread? = null
+
     @Volatile private var currentVideoFormat: MediaFormat? = null
     @Volatile private var currentAudioFormat: MediaFormat? = null
+    @Volatile private var currentMicAudioFormat: MediaFormat? = null
+    @Volatile private var currentGameAudioFormat: MediaFormat? = null
     @Volatile private var videoConfigBytes: ByteArray? = null
     @Volatile private var audioConfigBytes: ByteArray? = null
 
@@ -125,6 +133,8 @@ class HardwareMediaPipeline(
     private var muxer: MediaMuxer? = null
     private var muxerVideoTrack = -1
     private var muxerAudioTrack = -1
+    private var muxerMicAudioTrack = -1
+    private var muxerGameAudioTrack = -1
     private var muxerStarted = false
     private var currentRecordFile: File? = null
     private var recordStartMs = 0L
@@ -135,6 +145,8 @@ class HardwareMediaPipeline(
     @Volatile private var lastRawPtsUs = 0L
     private var lastMuxerVideoPtsUs = -1L
     private var lastMuxerAudioPtsUs = -1L
+    private var lastMuxerMicPtsUs = -1L
+    private var lastMuxerGamePtsUs = -1L
 
     // Instant Replay Buffer
     val replayRingBuffer = ReplayGopRingBuffer()
@@ -157,6 +169,7 @@ class HardwareMediaPipeline(
     fun startEncoders(videoConfig: VideoConfig) {
         if (videoRunning.get()) return
         recordingFormat = videoConfig.recordingFormat
+        multiTrackActive = videoConfig.multiTrackAudioEnabled
         startVideoEncoder(videoConfig)
         startAudioEncoder(videoConfig.audioBitrateKbps)
     }
@@ -188,6 +201,8 @@ class HardwareMediaPipeline(
                 muxer = MediaMuxer(target.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
                 muxerVideoTrack = -1
                 muxerAudioTrack = -1
+                muxerMicAudioTrack = -1
+                muxerGameAudioTrack = -1
                 muxerStarted = false
                 currentRecordFile = target
                 val now = System.currentTimeMillis()
@@ -197,6 +212,8 @@ class HardwareMediaPipeline(
                 ptsRebaser.reset()
                 lastMuxerVideoPtsUs = -1L
                 lastMuxerAudioPtsUs = -1L
+                lastMuxerMicPtsUs = -1L
+                lastMuxerGamePtsUs = -1L
                 maybeStartMuxerLocked()
             }
             requestKeyFrame()
@@ -241,6 +258,8 @@ class HardwareMediaPipeline(
             muxerStarted = false
             muxerVideoTrack = -1
             muxerAudioTrack = -1
+            muxerMicAudioTrack = -1
+            muxerGameAudioTrack = -1
             currentRecordFile = null
             ptsRebaser.reset()
         }
@@ -381,6 +400,21 @@ class HardwareMediaPipeline(
     fun pushAudioPcm(pcm16Stereo: ShortArray, sampleCount: Int, ptsUs: Long) {
         val codec = audioEncoder ?: return
         if (!audioRunning.get()) return
+        queuePcmIntoCodec(codec, pcm16Stereo, sampleCount, ptsUs)
+    }
+
+    fun pushIsolatedAudioPcm(
+        micPcm: ShortArray,
+        gamePcm: ShortArray,
+        sampleCount: Int,
+        ptsUs: Long
+    ) {
+        if (!audioRunning.get() || !multiTrackActive) return
+        micAudioEncoder?.let { queuePcmIntoCodec(it, micPcm, sampleCount, ptsUs) }
+        gameAudioEncoder?.let { queuePcmIntoCodec(it, gamePcm, sampleCount, ptsUs) }
+    }
+
+    private fun queuePcmIntoCodec(codec: MediaCodec, pcm16Stereo: ShortArray, sampleCount: Int, ptsUs: Long) {
         runCatching {
             val inIdx = codec.dequeueInputBuffer(0)
             if (inIdx >= 0) {
@@ -414,12 +448,23 @@ class HardwareMediaPipeline(
 
         audioRunning.set(false)
         runCatching { audioDrainThread?.join(400) }
+        runCatching { micAudioDrainThread?.join(300) }
+        runCatching { gameAudioDrainThread?.join(300) }
         audioDrainThread = null
+        micAudioDrainThread = null
+        gameAudioDrainThread = null
         runCatching { audioEncoder?.stop(); audioEncoder?.release() }
+        runCatching { micAudioEncoder?.stop(); micAudioEncoder?.release() }
+        runCatching { gameAudioEncoder?.stop(); gameAudioEncoder?.release() }
         audioEncoder = null
+        micAudioEncoder = null
+        gameAudioEncoder = null
+        currentMicAudioFormat = null
+        currentGameAudioFormat = null
     }
 
     fun getEncoderQueueDepth(): Int = namedSenders.values.maxOfOrNull { it.queueDepth() } ?: 0
+    fun getMaxCongestionPressure(): Float = namedSenders.values.maxOfOrNull { it.congestionPressure() } ?: 0f
     fun getRtmpBufferedBytes(): Long = namedSenders.values.sumOf { it.bufferedBytes() }
     fun getSecondaryBufferedBytes(): Long = getNamedBufferedBytes("secondary")
     fun getSecondaryDroppedFrames(): Long = secondaryNetworkDroppedFrames.get()
@@ -594,12 +639,16 @@ class HardwareMediaPipeline(
             muxer = MediaMuxer(nextFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             muxerVideoTrack = -1
             muxerAudioTrack = -1
+            muxerMicAudioTrack = -1
+            muxerGameAudioTrack = -1
             muxerStarted = false
             currentRecordFile = nextFile
             segmentStartMs = System.currentTimeMillis()
             ptsRebaser.reset()
             lastMuxerVideoPtsUs = -1L
             lastMuxerAudioPtsUs = -1L
+            lastMuxerMicPtsUs = -1L
+            lastMuxerGamePtsUs = -1L
             maybeStartMuxerLocked()
             repository.markActiveRecording(nextFile, segmentStartMs)
         }
@@ -622,6 +671,34 @@ class HardwareMediaPipeline(
             audioRunning.set(true)
             audioDrainThread = Thread({ drainAudioLoop(codec) }, "MobileLabs-AudioEnc").apply {
                 start()
+            }
+
+            if (multiTrackActive) {
+                val micFmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, 48000, 2).apply {
+                    setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                    setInteger(MediaFormat.KEY_BIT_RATE, audioBitrateKbps * 1000)
+                    setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
+                }
+                val micCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
+                micCodec.configure(micFmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                micCodec.start()
+                micAudioEncoder = micCodec
+                micAudioDrainThread = Thread({ drainIsolatedAudioLoop(micCodec, trackSlot = 2) }, "MobileLabs-MicEnc").apply {
+                    start()
+                }
+
+                val gameFmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, 48000, 2).apply {
+                    setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                    setInteger(MediaFormat.KEY_BIT_RATE, audioBitrateKbps * 1000)
+                    setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
+                }
+                val gameCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
+                gameCodec.configure(gameFmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                gameCodec.start()
+                gameAudioEncoder = gameCodec
+                gameAudioDrainThread = Thread({ drainIsolatedAudioLoop(gameCodec, trackSlot = 3) }, "MobileLabs-GameEnc").apply {
+                    start()
+                }
             }
         }
     }
@@ -681,22 +758,67 @@ class HardwareMediaPipeline(
         }
     }
 
+    private fun drainIsolatedAudioLoop(codec: MediaCodec, trackSlot: Int) {
+        val info = MediaCodec.BufferInfo()
+        while (audioRunning.get()) {
+            val idx = runCatching { codec.dequeueOutputBuffer(info, 10_000) }.getOrDefault(-1)
+            when {
+                idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                    synchronized(muxerLock) {
+                        if (trackSlot == 2) currentMicAudioFormat = codec.outputFormat
+                        if (trackSlot == 3) currentGameAudioFormat = codec.outputFormat
+                        maybeStartMuxerLocked()
+                    }
+                }
+                idx >= 0 -> {
+                    val buf = codec.getOutputBuffer(idx)
+                    if (buf != null && info.size > 0 && (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
+                        buf.position(info.offset)
+                        buf.limit(info.offset + info.size)
+                        val bytes = ByteArray(info.size)
+                        buf.get(bytes)
+                        if (recordingActive.get()) {
+                            writeMuxerSample(isVideo = false, isKey = false, rawBytes = bytes, info = info, audioTrackSlot = trackSlot)
+                        }
+                    }
+                    runCatching { codec.releaseOutputBuffer(idx, false) }
+                }
+            }
+        }
+    }
+
     private fun maybeStartMuxerLocked() {
         val m = muxer ?: return
         if (muxerStarted) return
         val vFmt = currentVideoFormat ?: return
         val aFmt = currentAudioFormat
         if (aFmt == null && audioEncoder != null) return
+        val micFmt = if (multiTrackActive && micAudioEncoder != null) currentMicAudioFormat else null
+        if (multiTrackActive && micAudioEncoder != null && micFmt == null) return
+        val gameFmt = if (multiTrackActive && gameAudioEncoder != null) currentGameAudioFormat else null
+        if (multiTrackActive && gameAudioEncoder != null && gameFmt == null) return
 
         muxerVideoTrack = m.addTrack(vFmt)
         if (aFmt != null) {
             muxerAudioTrack = m.addTrack(aFmt)
         }
+        if (micFmt != null) {
+            muxerMicAudioTrack = m.addTrack(micFmt)
+        }
+        if (gameFmt != null) {
+            muxerGameAudioTrack = m.addTrack(gameFmt)
+        }
         m.start()
         muxerStarted = true
     }
 
-    private fun writeMuxerSample(isVideo: Boolean, isKey: Boolean, rawBytes: ByteArray, info: MediaCodec.BufferInfo) {
+    private fun writeMuxerSample(
+        isVideo: Boolean,
+        isKey: Boolean,
+        rawBytes: ByteArray,
+        info: MediaCodec.BufferInfo,
+        audioTrackSlot: Int = 1
+    ) {
         if (!recordingActive.get()) return
         synchronized(muxerLock) {
             val m = muxer ?: return
@@ -704,18 +826,34 @@ class HardwareMediaPipeline(
                 maybeStartMuxerLocked()
                 if (!muxerStarted) return
             }
-            val track = if (isVideo) muxerVideoTrack else muxerAudioTrack
+            val track = when {
+                isVideo -> muxerVideoTrack
+                audioTrackSlot == 2 -> muxerMicAudioTrack
+                audioTrackSlot == 3 -> muxerGameAudioTrack
+                else -> muxerAudioTrack
+            }
             if (track < 0) return
 
             var rebasedPts = ptsRebaser.filterAndRebase(isVideo, isKey, info.presentationTimeUs)
             if (rebasedPts < 0L) return
 
-            if (isVideo) {
-                if (rebasedPts <= lastMuxerVideoPtsUs) rebasedPts = lastMuxerVideoPtsUs + 1L
-                lastMuxerVideoPtsUs = rebasedPts
-            } else {
-                if (rebasedPts <= lastMuxerAudioPtsUs) rebasedPts = lastMuxerAudioPtsUs + 1L
-                lastMuxerAudioPtsUs = rebasedPts
+            when {
+                isVideo -> {
+                    if (rebasedPts <= lastMuxerVideoPtsUs) rebasedPts = lastMuxerVideoPtsUs + 1L
+                    lastMuxerVideoPtsUs = rebasedPts
+                }
+                audioTrackSlot == 2 -> {
+                    if (rebasedPts <= lastMuxerMicPtsUs) rebasedPts = lastMuxerMicPtsUs + 1L
+                    lastMuxerMicPtsUs = rebasedPts
+                }
+                audioTrackSlot == 3 -> {
+                    if (rebasedPts <= lastMuxerGamePtsUs) rebasedPts = lastMuxerGamePtsUs + 1L
+                    lastMuxerGamePtsUs = rebasedPts
+                }
+                else -> {
+                    if (rebasedPts <= lastMuxerAudioPtsUs) rebasedPts = lastMuxerAudioPtsUs + 1L
+                    lastMuxerAudioPtsUs = rebasedPts
+                }
             }
 
             val rebasedInfo = MediaCodec.BufferInfo().apply {

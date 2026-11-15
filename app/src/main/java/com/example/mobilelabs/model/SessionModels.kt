@@ -56,6 +56,8 @@ enum class SourceType(val label: String, val isVisual: Boolean, val category: St
     MEDIA_SOURCE("Media (Video/Audio)", true, "Media & Graphics"),
     BROWSER_SOURCE("Browser / Alert URL", true, "Widgets & Chat"),
     CHAT_OVERLAY("Live Chat Box Overlay", true, "Widgets & Chat"),
+    ALERT_BOX("Stream Alert Box", true, "Widgets & Chat"),
+    GOAL_BAR("Follower / Sub Goal Bar", true, "Widgets & Chat"),
     TEXT_SOURCE("Text (FreeType/GPU)", true, "Media & Graphics"),
     TIMER_SOURCE("Timer / Stopwatch", true, "Widgets & Chat"),
     SCOREBOARD_SOURCE("Scoreboard Counter", true, "Widgets & Chat"),
@@ -64,6 +66,14 @@ enum class SourceType(val label: String, val isVisual: Boolean, val category: St
     SOUNDBOARD_SOURCE("Soundboard / SFX Pads", false, "Audio & SFX"),
     MIC_AUDIO("Mic/Aux", false, "Audio & SFX"),
     SYSTEM_AUDIO("System / Game Audio", false, "Audio & SFX")
+}
+
+enum class CameraWhiteBalanceMode(val label: String) {
+    AUTO("Auto"),
+    DAYLIGHT("Daylight"),
+    TUNGSTEN("Tungsten"),
+    CLOUDY("Cloudy"),
+    FLUORESCENT("Fluorescent")
 }
 
 enum class PreviewTool(val label: String) {
@@ -180,12 +190,14 @@ data class DualDestinationState(
     val droppedFrames: Long = 0L
 )
 
-// Phase 3: Gaming Scene Presets (M3.2)
+// Phase 3 & Pro Creator Scene Presets
 enum class GamingScenePreset(val label: String, val description: String) {
-    GAME_ONLY("Game Only", "Full 16:9 screen capture with audio mixer"),
-    GAME_FACECAM("Game + Facecam", "16:9 screen capture + corner Camera2 PiP"),
-    GAME_FACECAM_CHAT("Game + Facecam + Chat Box", "Screen + Facecam + styled Chat/Alert container placeholder"),
-    INTERMISSION_PACK("Starting Soon / BRB / Ending Pack", "Adds 3 editable intermission scenes with brand backdrop + titles")
+    GAME_ONLY("Game Only (60fps Minimal)", "Full 16:9 screen capture optimized for Geometry Dash & osu!"),
+    GAME_FACECAM("Game + Facecam", "16:9 screen capture + rounded Camera2 PiP"),
+    GAME_FACECAM_CHAT("Game + Facecam + Live Chat", "Screen + Facecam + GPU Live Chat Box + Stream Alert Box"),
+    PRO_ESPORTS_HUD("Pro Esports Match HUD", "Screen + Scoreboard + Match Timer + Alert Box + Goal Bar"),
+    COZY_IRL_GOAL("IRL Facecam + Goal + Chat", "Full-frame Camera2 Pro + Live Chat Overlay + Follower Goal Bar + Alerts"),
+    INTERMISSION_PACK("Starting / BRB / Ending Pack", "Adds 3 animated broadcast scenes with live countdown timers & titles")
 }
 
 // Phase 3: Samsung / One UI Awareness (M3.3)
@@ -240,7 +252,9 @@ data class VideoConfig(
     val screenCropOffsetYFraction: Float = 0.5f,
     val recordingFormat: RecordingFormat = RecordingFormat.FMP4,
     val dynamicBitrateEnabled: Boolean = true,
-    val lowLatencyNetworkMode: Boolean = true
+    val lowLatencyNetworkMode: Boolean = true,
+    val multiTrackAudioEnabled: Boolean = false,
+    val skipGoLivePreFlight: Boolean = false
 )
 
 @Immutable
@@ -269,6 +283,12 @@ data class SourceModel(
     val borderWidthPx: Float = 0f,
     val borderColorArgb: Long = 0xFFCC1B1BL,
     val mirrorHorizontal: Boolean = false,
+    val camExposureEv: Int = 0,
+    val camIso: Int = 0, // 0 = Auto AE
+    val camFocusDistance: Float = -1f, // -1 = Continuous AF
+    val camWhiteBalance: CameraWhiteBalanceMode = CameraWhiteBalanceMode.AUTO,
+    val camZoomRatio: Float = 1.0f,
+    val camTorchEnabled: Boolean = false,
     val mediaPathOrUri: String? = null,
     val mediaLoop: Boolean = true,
     val mediaMuted: Boolean = false,
@@ -292,6 +312,11 @@ data class SourceModel(
     val scoreAwayName: String = "P2",
     val scoreHome: Int = 0,
     val scoreAway: Int = 0,
+    val goalTitle: String = "FOLLOWER GOAL",
+    val goalCurrent: Int = 42,
+    val goalTarget: Int = 100,
+    val goalAccentColorArgb: Long = 0xFF9146FFL,
+    val alertShowChime: Boolean = true,
     val drawingBrushColorArgb: Long = 0xFFFF3B30L,
     val drawingBrushSizePx: Float = 10f,
     val chatOverlayOpacity: Float = 0.72f,
@@ -516,7 +541,12 @@ data class MobileLabsUiState(
     val pushToTalkHeld: Boolean = false,
     val lastScreenshotPath: String? = null,
     val customYoutubeClientIdSaved: Boolean = false,
-    val customTwitchClientIdSaved: Boolean = false
+    val customTwitchClientIdSaved: Boolean = false,
+    val twitchDeviceAuth: TwitchDeviceAuthState = TwitchDeviceAuthState(),
+    val activeAlertEvent: StreamAlertEvent? = null,
+    val alertHistory: List<StreamAlertEvent> = emptyList(),
+    val abrTargetBitrateKbps: Int = 0,
+    val showPreFlightSheet: Boolean = false
 )
 
 fun defaultSoundboardPads(): List<SoundboardPad> = listOf(

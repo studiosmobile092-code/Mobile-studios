@@ -64,11 +64,11 @@ fun GamingScenePresetsDialog(
             color = ObsWindowBg,
             shape = RoundedCornerShape(4.dp),
             border = BorderStroke(1.dp, ObsBorder),
-            modifier = Modifier.fillMaxWidth(0.72f)
+            modifier = Modifier.fillMaxWidth(0.76f).fillMaxHeight(0.84f)
         ) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("One-Tap Gaming Scene Presets (M3.2)", style = MaterialTheme.typography.titleMedium, color = StudioText)
+                    Text("One-Tap Gaming & Creator Scene Packs", style = MaterialTheme.typography.titleMedium, color = StudioText)
                     TextButton(onClick = onDismiss) { Text("Close", color = StudioText) }
                 }
                 Text(
@@ -76,30 +76,35 @@ fun GamingScenePresetsDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = StudioTextDim
                 )
-                GamingScenePreset.entries.forEach { preset ->
-                    Surface(
-                        color = ObsWellBg,
-                        shape = RoundedCornerShape(4.dp),
-                        border = BorderStroke(1.dp, ObsBorder),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(12.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                Column(
+                    modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    GamingScenePreset.entries.forEach { preset ->
+                        Surface(
+                            color = ObsWellBg,
+                            shape = RoundedCornerShape(4.dp),
+                            border = BorderStroke(1.dp, ObsBorder),
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(preset.label, style = MaterialTheme.typography.titleSmall, color = StudioText)
-                                Text(preset.description, style = MaterialTheme.typography.bodySmall, color = StudioTextDim)
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(preset.label, style = MaterialTheme.typography.titleSmall, color = StudioText)
+                                    Text(preset.description, style = MaterialTheme.typography.bodySmall, color = StudioTextDim)
+                                }
+                                Button(
+                                    onClick = {
+                                        onApplyPreset(preset)
+                                        onDismiss()
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = ObsSelectionBlue),
+                                    modifier = Modifier.testTag("apply_gaming_preset_${preset.name.lowercase()}")
+                                ) { Text("Apply", color = StudioText) }
                             }
-                            Button(
-                                onClick = {
-                                    onApplyPreset(preset)
-                                    onDismiss()
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = ObsSelectionBlue),
-                                modifier = Modifier.testTag("apply_gaming_preset_${preset.name.lowercase()}")
-                            ) { Text("Apply", color = StudioText) }
                         }
                     }
                 }

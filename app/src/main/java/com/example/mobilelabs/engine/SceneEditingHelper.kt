@@ -87,6 +87,23 @@ object SceneEditingHelper {
                 chatOverlayMaxMessages = 7,
                 transform = SourceTransform(0.03f, 0.44f, 0.32f, 0.48f)
             )
+            SourceType.ALERT_BOX -> SourceModel(
+                id = "src_alert_$ts",
+                name = "Stream Alert Box",
+                type = SourceType.ALERT_BOX,
+                alertShowChime = true,
+                transform = SourceTransform(0.28f, 0.04f, 0.44f, 0.14f)
+            )
+            SourceType.GOAL_BAR -> SourceModel(
+                id = "src_goal_$ts",
+                name = "Follower Goal Bar",
+                type = SourceType.GOAL_BAR,
+                goalTitle = "FOLLOWER GOAL",
+                goalCurrent = 42,
+                goalTarget = 100,
+                goalAccentColorArgb = 0xFF9146FFL,
+                transform = SourceTransform(0.58f, 0.85f, 0.38f, 0.11f)
+            )
             SourceType.TEXT_SOURCE -> SourceModel(
                 id = "src_text_$ts",
                 name = "Text Banner",

@@ -26,6 +26,7 @@ import android.os.Process
 import android.os.SystemClock
 import android.view.Surface
 import androidx.core.graphics.createBitmap
+import androidx.core.net.toUri
 import com.example.mobilelabs.model.DrawingStroke
 import com.example.mobilelabs.model.FacecamShape
 import com.example.mobilelabs.model.LutPreset
@@ -35,6 +36,7 @@ import com.example.mobilelabs.model.SceneModel
 import com.example.mobilelabs.model.ScreenFitMode
 import com.example.mobilelabs.model.SourceModel
 import com.example.mobilelabs.model.SourceType
+import com.example.mobilelabs.model.StreamAlertEvent
 import com.example.mobilelabs.model.TransitionType
 import com.example.mobilelabs.model.VideoConfig
 import com.example.mobilelabs.model.VideoFilterConfig
@@ -105,6 +107,7 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         val uChromaParams = GLES30.glGetUniformLocation(programId, "uChromaParams")
         val uSharpenEnabled = GLES30.glGetUniformLocation(programId, "uSharpenEnabled")
         val uSharpenAmount = GLES30.glGetUniformLocation(programId, "uSharpenAmount")
+        val uBeautyStrength = GLES30.glGetUniformLocation(programId, "uBeautyStrength")
         val uTexelSize = GLES30.glGetUniformLocation(programId, "uTexelSize")
         val uLutMode = GLES30.glGetUniformLocation(programId, "uLutMode")
         val uLutIntensity = GLES30.glGetUniformLocation(programId, "uLutIntensity")
@@ -157,6 +160,8 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
     private val chatVersionRef = AtomicLong(0L)
     private val drawingStrokesRef = AtomicReference<List<DrawingStroke>>(emptyList())
     private val drawingVersionRef = AtomicLong(0L)
+    private val activeAlertRef = AtomicReference<StreamAlertEvent?>(null)
+    private val alertVersionRef = AtomicLong(0L)
     private val pendingScreenshotCallback = AtomicReference<((Bitmap?) -> Unit)?>(null)
 
     private val screenFrameAvailable = AtomicBoolean(false)
@@ -288,6 +293,13 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         chatVersionRef.set(chatVersion)
         drawingStrokesRef.set(drawingStrokes)
         drawingVersionRef.set(drawingVersion)
+    }
+
+    fun updateAlertEvent(event: StreamAlertEvent?) {
+        val prev = activeAlertRef.getAndSet(event)
+        if (prev?.id != event?.id) {
+            alertVersionRef.incrementAndGet()
+        }
     }
 
     fun captureScreenshot(onComplete: (Bitmap?) -> Unit) {
@@ -557,6 +569,7 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
             uniform vec3 uChromaParams;
             uniform int uSharpenEnabled;
             uniform float uSharpenAmount;
+            uniform float uBeautyStrength;
             uniform vec2 uTexelSize;
             uniform int uLutMode;
             uniform float uLutIntensity;
@@ -586,19 +599,32 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
 
             vec3 applyLut(vec3 c, int mode, float intensity) {
                 vec3 graded = c;
-                if (mode == 1) {
+                if (mode == 1) { // Vivid Gaming
                     float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
                     graded = clamp(mix(vec3(l), c, 1.32) * 1.06 - 0.03, 0.0, 1.0);
-                } else if (mode == 2) {
+                } else if (mode == 2) { // Teal & Orange
                     vec3 shadows = vec3(c.r * 0.88, c.g * 1.02, min(1.0, c.b * 1.16 + 0.04));
                     vec3 highs = vec3(min(1.0, c.r * 1.14 + 0.04), c.g * 1.01, c.b * 0.85);
                     float l = dot(c, vec3(0.299, 0.587, 0.114));
                     graded = mix(shadows, highs, smoothstep(0.18, 0.82, l));
-                } else if (mode == 3) {
+                } else if (mode == 3) { // Crisp Mono
                     float l = dot(c, vec3(0.299, 0.587, 0.114));
                     graded = vec3(clamp((l - 0.5) * 1.2 + 0.5, 0.0, 1.0));
-                } else if (mode == 4) {
+                } else if (mode == 4) { // Warm Cinema
                     graded = clamp(vec3(c.r * 1.08 + 0.02, c.g * 1.01, c.b * 0.90), 0.0, 1.0);
+                } else if (mode == 5) { // Cyberpunk Neon
+                    vec3 neonShadow = vec3(c.r * 0.82 + 0.04, c.g * 0.96 + 0.02, min(1.0, c.b * 1.25 + 0.08));
+                    vec3 neonHigh = vec3(min(1.0, c.r * 1.24 + 0.05), c.g * 0.88, min(1.0, c.b * 1.18 + 0.03));
+                    float l = dot(c, vec3(0.299, 0.587, 0.114));
+                    graded = clamp(mix(neonShadow, neonHigh, smoothstep(0.22, 0.78, l)), 0.0, 1.0);
+                } else if (mode == 6) { // Pastel IRL
+                    vec3 lifted = pow(max(c, vec3(0.001)), vec3(0.88)) * 0.94 + vec3(0.05, 0.04, 0.06);
+                    float l = dot(lifted, vec3(0.299, 0.587, 0.114));
+                    graded = clamp(mix(vec3(l), lifted, 0.84), 0.0, 1.0);
+                } else if (mode == 7) { // HDR Contrast Boost
+                    vec3 sc = c * c * (3.0 - 2.0 * c);
+                    float l = dot(sc, vec3(0.2126, 0.7152, 0.0722));
+                    graded = clamp(mix(vec3(l), sc, 1.18), 0.0, 1.0);
                 }
                 return mix(c, graded, intensity);
             }
@@ -612,6 +638,17 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
                 vec4 base = (uIsSolid == 1) ? uSolidColor : texture(uSampler, sampleUv);
                 vec3 rgb = base.rgb;
                 float alpha = base.a * uOpacity;
+
+                if (uIsSolid == 0 && uBeautyStrength > 0.01) {
+                    vec2 off = uTexelSize * 2.2;
+                    vec3 s0 = texture(uSampler, sampleUv + vec2(off.x, off.y)).rgb;
+                    vec3 s1 = texture(uSampler, sampleUv + vec2(-off.x, off.y)).rgb;
+                    vec3 s2 = texture(uSampler, sampleUv + vec2(off.x, -off.y)).rgb;
+                    vec3 s3 = texture(uSampler, sampleUv + vec2(-off.x, -off.y)).rgb;
+                    vec3 soft = (s0 + s1 + s2 + s3 + rgb * 2.0) / 6.0;
+                    float edgeDiff = clamp(1.0 - length(rgb - soft) * 6.5, 0.0, 1.0);
+                    rgb = mix(rgb, soft * 1.02 + vec3(0.012, 0.006, 0.004), uBeautyStrength * edgeDiff * 0.72);
+                }
 
                 if (uIsSolid == 0 && uSharpenEnabled == 1) {
                     vec3 n = texture(uSampler, sampleUv + vec2(0.0, uTexelSize.y)).rgb;
@@ -630,7 +667,8 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
                     float keyAlpha = smoothstep(sim, sim + smoothRange, dist);
                     alpha *= keyAlpha;
                     float luma = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
-                    rgb = mix(vec3(luma), rgb, clamp(keyAlpha + (1.0 - spill), 0.0, 1.0));
+                    float despillMix = clamp(1.0 - keyAlpha + (1.0 - dist) * spill * 0.55, 0.0, 1.0) * spill;
+                    rgb = mix(rgb, vec3(luma), despillMix);
                 }
 
                 if (uColorEnabled == 1) {
@@ -941,6 +979,8 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
                 SourceType.GIF_STICKER -> drawGifStickerSource(src, cfg, globalAlpha, xOffsetNdc)
                 SourceType.BROWSER_SOURCE -> drawBrowserSource(src, globalAlpha, xOffsetNdc)
                 SourceType.CHAT_OVERLAY -> drawChatOverlaySource(src, globalAlpha, xOffsetNdc)
+                SourceType.ALERT_BOX -> drawAlertBoxSource(src, globalAlpha, xOffsetNdc)
+                SourceType.GOAL_BAR -> drawGoalBarSource(src, globalAlpha, xOffsetNdc)
                 SourceType.TEXT_SOURCE -> drawTextSource(src, globalAlpha, xOffsetNdc)
                 SourceType.TIMER_SOURCE -> drawTimerSource(src, globalAlpha, xOffsetNdc)
                 SourceType.SCOREBOARD_SOURCE -> drawScoreboardSource(src, globalAlpha, xOffsetNdc)
@@ -1136,6 +1176,35 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         draw2dTexture(src, tex, globalAlpha, xOffsetNdc)
     }
 
+    private fun drawAlertBoxSource(src: SourceModel, globalAlpha: Float, xOffsetNdc: Float) {
+        val alert = activeAlertRef.get() ?: return
+        val ver = alertVersionRef.get()
+        val key = "alert|${src.id}"
+        val existing = textureCache[key]
+        val tex = if (existing != null && existing.version == ver) {
+            existing.lastUsedFrame = renderFrameCounter
+            existing
+        } else {
+            val bmp = DynamicSourceRenderer.renderAlertBoxBitmap(alert)
+            updateOrCreateDynamicTexture(key, ver, bmp, recycleAfterUpload = true)
+        }
+        draw2dTexture(src, tex, globalAlpha, xOffsetNdc)
+    }
+
+    private fun drawGoalBarSource(src: SourceModel, globalAlpha: Float, xOffsetNdc: Float) {
+        val ver = ("${src.goalTitle}|${src.goalCurrent}|${src.goalTarget}|${src.goalAccentColorArgb}").hashCode().toLong()
+        val key = "goal|${src.id}"
+        val existing = textureCache[key]
+        val tex = if (existing != null && existing.version == ver) {
+            existing.lastUsedFrame = renderFrameCounter
+            existing
+        } else {
+            val bmp = DynamicSourceRenderer.renderGoalBarBitmap(src)
+            updateOrCreateDynamicTexture(key, ver, bmp, recycleAfterUpload = true)
+        }
+        draw2dTexture(src, tex, globalAlpha, xOffsetNdc)
+    }
+
     private fun drawInkLayerSource(src: SourceModel, cfg: VideoConfig, globalAlpha: Float, xOffsetNdc: Float) {
         val strokes = drawingStrokesRef.get()
         if (strokes.isEmpty()) return
@@ -1235,6 +1304,8 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         val sharpenAmt = if (f.sharpenEnabled) f.sharpenAmount else if (autoBicubicSharpen) 0.25f else 0f
         GLES30.glUniform1i(locs.uSharpenEnabled, if (sharpenOn) 1 else 0)
         GLES30.glUniform1f(locs.uSharpenAmount, sharpenAmt)
+        val beautyAmt = if (!suspended && f.beautyEnabled) f.beautyStrength.coerceIn(0f, 1f) else 0f
+        GLES30.glUniform1f(locs.uBeautyStrength, beautyAmt)
         GLES30.glUniform2f(locs.uTexelSize, 1f / max(1, texW), 1f / max(1, texH))
 
         val usePoint = f.scaleAspectEnabled && f.scaleFilter == ScaleFilterType.POINT
@@ -1246,6 +1317,9 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
             LutPreset.TEAL_ORANGE -> 2
             LutPreset.CRISP_MONO -> 3
             LutPreset.WARM_CINEMA -> 4
+            LutPreset.CYBERPUNK_NEON -> 5
+            LutPreset.PASTEL_IRL -> 6
+            LutPreset.HDR_BOOST -> 7
         }
         GLES30.glUniform1i(locs.uLutMode, lutIdx)
         GLES30.glUniform1f(locs.uLutIntensity, f.lutIntensity)
@@ -1341,7 +1415,7 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         val ctx = appContext
         val bmp: Bitmap? = if (pathOrUri.startsWith("content://") && ctx != null) {
             runCatching {
-                val uri = Uri.parse(pathOrUri)
+                val uri = pathOrUri.toUri()
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 ctx.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
                 if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null

@@ -48,14 +48,20 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
+import com.example.mobilelabs.model.AlertEventType
 import com.example.mobilelabs.model.AudioChannelState
 import com.example.mobilelabs.model.AudioFilterConfig
+import com.example.mobilelabs.model.AudioMonitoringMode
+import com.example.mobilelabs.model.CameraWhiteBalanceMode
 import com.example.mobilelabs.model.FacecamShape
 import com.example.mobilelabs.model.LutPreset
 import com.example.mobilelabs.model.ScaleFilterType
 import com.example.mobilelabs.model.SourceModel
 import com.example.mobilelabs.model.SourceType
 import com.example.mobilelabs.model.VideoFilterConfig
+import com.example.mobilelabs.model.VoiceEffectPreset
 import com.example.ui.theme.ApertureRed
 import com.example.ui.theme.ApertureRedHi
 import com.example.ui.theme.ObsSelectionBlue
@@ -134,6 +140,8 @@ fun SourcePropertiesDialog(
     onControlTimer: (String, String) -> Unit,
     onAdjustScoreboard: (String, Boolean, Int) -> Unit,
     onResetScoreboard: (String) -> Unit,
+    onAdjustGoalProgress: (String, Int) -> Unit,
+    onTriggerTestAlert: (AlertEventType) -> Unit,
     onOpenLiveChat: () -> Unit,
     onClearDrawing: () -> Unit
 ) {
@@ -147,12 +155,18 @@ fun SourcePropertiesDialog(
     var mediaMuted by remember(source.id) { mutableStateOf(source.mediaMuted) }
     var mediaPlaying by remember(source.id) { mutableStateOf(source.mediaPlaying) }
 
-    // Camera facecam mask + border
+    // Camera facecam mask + border + Camera2 Pro controls
     var facecamShape by remember(source.id) { mutableStateOf(source.facecamShape) }
     var borderWidthPx by remember(source.id) { mutableFloatStateOf(source.borderWidthPx) }
     var borderColorArgb by remember(source.id) { mutableStateOf(source.borderColorArgb) }
     var mirrorHorizontal by remember(source.id) { mutableStateOf(source.mirrorHorizontal) }
     var useFrontCam by remember(source.id) { mutableStateOf(source.useFrontCamera) }
+    var camExposureEv by remember(source.id) { mutableIntStateOf(source.camExposureEv) }
+    var camIso by remember(source.id) { mutableIntStateOf(source.camIso) }
+    var camFocusDistance by remember(source.id) { mutableFloatStateOf(source.camFocusDistance) }
+    var camWhiteBalance by remember(source.id) { mutableStateOf(source.camWhiteBalance) }
+    var camZoomRatio by remember(source.id) { mutableFloatStateOf(source.camZoomRatio) }
+    var camTorchEnabled by remember(source.id) { mutableStateOf(source.camTorchEnabled) }
 
     // Browser source
     var browserUrl by remember(source.id) { mutableStateOf(source.browserUrl) }
@@ -170,6 +184,12 @@ fun SourcePropertiesDialog(
     // Chat overlay
     var chatOpacity by remember(source.id) { mutableFloatStateOf(source.chatOverlayOpacity) }
     var chatMaxMessages by remember(source.id) { mutableIntStateOf(source.chatOverlayMaxMessages) }
+
+    // Goal Bar & Alert Box
+    var goalTitle by remember(source.id) { mutableStateOf(source.goalTitle) }
+    var goalTargetText by remember(source.id) { mutableStateOf(source.goalTarget.toString()) }
+    var goalAccentColorArgb by remember(source.id) { mutableStateOf(source.goalAccentColorArgb) }
+    var alertShowChime by remember(source.id) { mutableStateOf(source.alertShowChime) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -219,6 +239,62 @@ fun SourcePropertiesDialog(
                             options = listOf(0xFFCC1B1BL, 0xFFFFFFFFL, 0xFF9146FFL, 0xFF43B581L, 0xFFF5A524L),
                             onSelect = { borderColorArgb = it }
                         )
+                        HorizontalDivider(color = StudioDivider)
+                        Text("Camera2 Pro Controls (Manual Sensor)", style = MaterialTheme.typography.labelMedium, color = ApertureRedHi, fontWeight = FontWeight.Bold)
+                        Text("Exposure Compensation (EV): ${if (camExposureEv >= 0) "+$camExposureEv" else "$camExposureEv"}", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
+                        Slider(
+                            value = camExposureEv.toFloat(),
+                            onValueChange = { camExposureEv = it.toInt() },
+                            valueRange = -4f..4f,
+                            steps = 7
+                        )
+                        Text("ISO Sensitivity: ${if (camIso == 0) "Auto" else camIso.toString()}", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
+                        Row(
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            listOf(0, 100, 200, 400, 800, 1600).forEach { iso ->
+                                val active = camIso == iso
+                                OutlinedButton(
+                                    onClick = { camIso = iso },
+                                    border = BorderStroke(1.dp, if (active) ObsSelectionBlue else StudioDivider),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    modifier = Modifier.height(32.dp)
+                                ) { Text(if (iso == 0) "Auto" else "$iso", fontSize = 11.sp, color = StudioText) }
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Text("Manual Focus (off = Auto AF)", color = StudioText)
+                            Switch(
+                                checked = camFocusDistance >= 0f,
+                                onCheckedChange = { manual -> camFocusDistance = if (manual) 2.5f else -1f }
+                            )
+                        }
+                        if (camFocusDistance >= 0f) {
+                            Text("Focus Distance: ${String.format(Locale.US, "%.1f", camFocusDistance)} diopters", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
+                            Slider(value = camFocusDistance, onValueChange = { camFocusDistance = it }, valueRange = 0f..10f)
+                        }
+                        Text("White Balance", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
+                        Row(
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            CameraWhiteBalanceMode.entries.forEach { wb ->
+                                val active = camWhiteBalance == wb
+                                OutlinedButton(
+                                    onClick = { camWhiteBalance = wb },
+                                    border = BorderStroke(1.dp, if (active) ApertureRedHi else StudioDivider),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    modifier = Modifier.height(32.dp)
+                                ) { Text(wb.label, fontSize = 11.sp, color = StudioText) }
+                            }
+                        }
+                        Text("Optical / Digital Zoom: ${String.format(Locale.US, "%.1fx", camZoomRatio)}", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
+                        Slider(value = camZoomRatio, onValueChange = { camZoomRatio = it }, valueRange = 1.0f..4.0f)
+                        Row(horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Text("Camera Torch / Flash (Rear Only)", color = StudioText)
+                            Switch(checked = camTorchEnabled, onCheckedChange = { camTorchEnabled = it })
+                        }
                     }
                     SourceType.BROWSER_SOURCE -> {
                         OutlinedTextField(
@@ -312,6 +388,58 @@ fun SourcePropertiesDialog(
                         }
                         OutlinedButton(onClick = { onDismiss(); onOpenLiveChat() }) {
                             Text("Open Live Chat Drawer", color = StudioText)
+                        }
+                    }
+                    SourceType.GOAL_BAR -> {
+                        OutlinedTextField(
+                            value = goalTitle,
+                            onValueChange = { goalTitle = it },
+                            label = { Text("Goal Bar Title") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().testTag("goal_title_input")
+                        )
+                        OutlinedTextField(
+                            value = goalTargetText,
+                            onValueChange = { txt -> goalTargetText = txt.filter { it.isDigit() } },
+                            label = { Text("Target Count") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().testTag("goal_target_input")
+                        )
+                        Text(
+                            "Progress: ${source.goalCurrent} / ${goalTargetText.toIntOrNull()?.coerceAtLeast(1) ?: source.goalTarget}",
+                            color = StudioText,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(onClick = { onAdjustGoalProgress(source.id, -1) }) { Text("-1", color = StudioText) }
+                            OutlinedButton(onClick = { onAdjustGoalProgress(source.id, 1) }) { Text("+1", color = StatusOk) }
+                            OutlinedButton(onClick = { onAdjustGoalProgress(source.id, 5) }) { Text("+5", color = StatusOk) }
+                        }
+                        Text("Goal Accent Color", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
+                        ColorSwatchRow(
+                            selected = goalAccentColorArgb,
+                            options = listOf(0xFF9146FFL, 0xFFE62117L, 0xFF00C853L, 0xFFFFB300L, 0xFF29B6F6L),
+                            onSelect = { goalAccentColorArgb = it }
+                        )
+                    }
+                    SourceType.ALERT_BOX -> {
+                        Row(horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Text("Play Broadcast Chime SFX", color = StudioText)
+                            Switch(checked = alertShowChime, onCheckedChange = { alertShowChime = it })
+                        }
+                        Text("Trigger Test Stream Alert", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
+                        Row(
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            AlertEventType.entries.forEach { evType ->
+                                OutlinedButton(
+                                    onClick = { onTriggerTestAlert(evType) },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    modifier = Modifier.height(34.dp)
+                                ) { Text(evType.label, fontSize = 10.sp, color = StudioText) }
+                            }
                         }
                     }
                     SourceType.DRAWING_LAYER -> {
@@ -423,6 +551,12 @@ fun SourcePropertiesDialog(
                             borderWidthPx = borderWidthPx,
                             borderColorArgb = borderColorArgb,
                             mirrorHorizontal = mirrorHorizontal,
+                            camExposureEv = camExposureEv,
+                            camIso = camIso,
+                            camFocusDistance = camFocusDistance,
+                            camWhiteBalance = camWhiteBalance,
+                            camZoomRatio = camZoomRatio,
+                            camTorchEnabled = camTorchEnabled,
                             browserUrl = browserUrl.trim().ifBlank { cur.browserUrl },
                             browserFpsCap = browserFpsCap,
                             browserTransparentBg = browserTransparentBg,
@@ -431,7 +565,11 @@ fun SourcePropertiesDialog(
                             scoreHomeName = scoreHomeName.ifBlank { cur.scoreHomeName },
                             scoreAwayName = scoreAwayName.ifBlank { cur.scoreAwayName },
                             chatOverlayOpacity = chatOpacity,
-                            chatOverlayMaxMessages = chatMaxMessages
+                            chatOverlayMaxMessages = chatMaxMessages,
+                            goalTitle = goalTitle.ifBlank { cur.goalTitle },
+                            goalTarget = goalTargetText.toIntOrNull()?.coerceAtLeast(1) ?: cur.goalTarget,
+                            goalAccentColorArgb = goalAccentColorArgb,
+                            alertShowChime = alertShowChime
                         )
                     }
                     onDismiss()
@@ -491,6 +629,68 @@ fun AudioFiltersDialog(
                     FilterToggleCard("Limiter", cfg.limiterEnabled, { cfg = cfg.copy(limiterEnabled = it) }) {
                         Text("Ceiling: ${String.format(Locale.US, "%.1f dB", cfg.limiterCeilingDb)}", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
                         Slider(value = cfg.limiterCeilingDb, onValueChange = { cfg = cfg.copy(limiterCeilingDb = it) }, valueRange = -12f..-0.2f)
+                    }
+                    FilterToggleCard("3-Band Studio EQ (Biquad Low / Mid / High)", cfg.eqEnabled, { cfg = cfg.copy(eqEnabled = it) }) {
+                        Text(
+                            "Low ${String.format(Locale.US, "%+.1f", cfg.eqLowDb)} dB · Mid ${String.format(Locale.US, "%+.1f", cfg.eqMidDb)} dB · High ${String.format(Locale.US, "%+.1f", cfg.eqHighDb)} dB",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = StudioTextDim
+                        )
+                        Slider(value = cfg.eqLowDb, onValueChange = { cfg = cfg.copy(eqLowDb = it) }, valueRange = -12f..12f)
+                        Slider(value = cfg.eqMidDb, onValueChange = { cfg = cfg.copy(eqMidDb = it) }, valueRange = -12f..12f)
+                        Slider(value = cfg.eqHighDb, onValueChange = { cfg = cfg.copy(eqHighDb = it) }, valueRange = -12f..12f)
+                    }
+                    Surface(
+                        color = SurfaceLevel2,
+                        shape = RoundedCornerShape(6.dp),
+                        border = BorderStroke(1.dp, if (cfg.voiceEffect != VoiceEffectPreset.NONE) ApertureRedHi else StudioDivider),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Real-Time Voice FX & Studio Reverb", style = MaterialTheme.typography.bodyMedium, color = StudioText, fontWeight = FontWeight.Medium)
+                            Row(
+                                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                VoiceEffectPreset.entries.forEach { preset ->
+                                    val active = cfg.voiceEffect == preset
+                                    OutlinedButton(
+                                        onClick = { cfg = cfg.copy(voiceEffect = preset) },
+                                        border = BorderStroke(1.dp, if (active) ApertureRedHi else StudioDivider),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(34.dp).testTag("voice_fx_${preset.name.lowercase()}")
+                                    ) { Text(preset.label, fontSize = 11.sp, color = StudioText) }
+                                }
+                            }
+                            if (cfg.voiceEffect == VoiceEffectPreset.STUDIO_REVERB) {
+                                Text("Reverb Wet Mix: ${(cfg.reverbMix * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
+                                Slider(value = cfg.reverbMix, onValueChange = { cfg = cfg.copy(reverbMix = it) }, valueRange = 0.05f..0.75f)
+                            }
+                        }
+                    }
+                    Surface(
+                        color = SurfaceLevel2,
+                        shape = RoundedCornerShape(6.dp),
+                        border = BorderStroke(1.dp, if (cfg.monitoringMode != AudioMonitoringMode.OFF) ObsSelectionBlue else StudioDivider),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Ear Monitoring Mode (Low-Latency AudioTrack)", style = MaterialTheme.typography.bodyMedium, color = StudioText, fontWeight = FontWeight.Medium)
+                            Row(
+                                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                AudioMonitoringMode.entries.forEach { mode ->
+                                    val active = cfg.monitoringMode == mode
+                                    OutlinedButton(
+                                        onClick = { cfg = cfg.copy(monitoringMode = mode) },
+                                        border = BorderStroke(1.dp, if (active) ObsSelectionBlue else StudioDivider),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(34.dp).testTag("audio_monitor_${mode.name.lowercase()}")
+                                    ) { Text(mode.label, fontSize = 11.sp, color = StudioText) }
+                                }
+                            }
+                        }
                     }
                     FilterToggleCard("Sidechain Auto-Ducking (Lowers Game when Speaking)", cfg.autoDuckingEnabled, { cfg = cfg.copy(autoDuckingEnabled = it) }) {
                         Text("Duck Amount: ${cfg.duckAmountDb.toInt()} dB", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
@@ -562,17 +762,25 @@ fun VideoFiltersDialog(
                         Slider(value = cfg.chromaSimilarity, onValueChange = { cfg = cfg.copy(chromaSimilarity = it) }, valueRange = 0.05f..0.6f)
                         Slider(value = cfg.chromaSmoothness, onValueChange = { cfg = cfg.copy(chromaSmoothness = it) }, valueRange = 0.01f..0.3f)
                     }
+                    FilterToggleCard("Beauty Skin Softening (GPU Bilateral Smooth)", cfg.beautyEnabled, { cfg = cfg.copy(beautyEnabled = it) }) {
+                        Text("Softening Strength: ${(cfg.beautyStrength * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
+                        Slider(value = cfg.beautyStrength, onValueChange = { cfg = cfg.copy(beautyStrength = it) }, valueRange = 0.1f..1.0f)
+                    }
                     FilterToggleCard("Sharpen (GPU 3x3 Unsharp Mask)", cfg.sharpenEnabled, { cfg = cfg.copy(sharpenEnabled = it) }) {
                         Text("Amount: ${(cfg.sharpenAmount * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
                         Slider(value = cfg.sharpenAmount, onValueChange = { cfg = cfg.copy(sharpenAmount = it) }, valueRange = 0.05f..1f)
                     }
-                    FilterToggleCard("Color LUT Preset", cfg.lutEnabled, { cfg = cfg.copy(lutEnabled = it) }) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterToggleCard("Color LUT Preset (7 Built-In Studio Looks)", cfg.lutEnabled, { cfg = cfg.copy(lutEnabled = it) }) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
                             LutPreset.entries.filter { it != LutPreset.NONE }.forEach { preset ->
                                 val active = cfg.lutPreset == preset
                                 OutlinedButton(
                                     onClick = { cfg = cfg.copy(lutPreset = preset) },
-                                    border = BorderStroke(1.dp, if (active) ApertureRedHi else StudioDivider)
+                                    border = BorderStroke(1.dp, if (active) ApertureRedHi else StudioDivider),
+                                    modifier = Modifier.testTag("lut_preset_${preset.name.lowercase()}")
                                 ) { Text(preset.label, style = MaterialTheme.typography.labelSmall, color = StudioText) }
                             }
                         }

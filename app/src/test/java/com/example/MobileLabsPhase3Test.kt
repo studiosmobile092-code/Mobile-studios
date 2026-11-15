@@ -74,11 +74,44 @@ class MobileLabsPhase3Test {
         val types = camChat.first().sources.map { it.type }
         assertTrue(types.contains(SourceType.SCREEN_CAPTURE))
         assertTrue(types.contains(SourceType.CAMERA_2))
-        assertTrue(types.contains(SourceType.TEXT_SOURCE))
+        assertTrue(types.contains(SourceType.CHAT_OVERLAY))
+        assertTrue(types.contains(SourceType.ALERT_BOX))
+
+        val esports = GamingScenePresets.buildScenesForPreset(GamingScenePreset.PRO_ESPORTS_HUD)
+        val esportsTypes = esports.first().sources.map { it.type }
+        assertTrue(esportsTypes.contains(SourceType.SCOREBOARD_SOURCE))
+        assertTrue(esportsTypes.contains(SourceType.GOAL_BAR))
+        assertTrue(esportsTypes.contains(SourceType.ALERT_BOX))
+
+        val irl = GamingScenePresets.buildScenesForPreset(GamingScenePreset.COZY_IRL_GOAL)
+        val irlTypes = irl.first().sources.map { it.type }
+        assertTrue(irlTypes.contains(SourceType.CAMERA_2))
+        assertTrue(irlTypes.contains(SourceType.GOAL_BAR))
 
         val pack = GamingScenePresets.buildScenesForPreset(GamingScenePreset.INTERMISSION_PACK)
         assertEquals(3, pack.size)
         assertEquals(listOf("Starting Soon", "Be Right Back", "Stream Ending"), pack.map { it.name })
+    }
+
+    @Test
+    fun `M3_1 network ABR drops bitrate under congestion and recovers smoothly when clear`() {
+        val baseKbps = 6000
+        val steppedDown = AdaptiveQualityEngine.evaluateNetworkAbr(
+            currentBitrateKbps = baseKbps,
+            configuredBaseKbps = baseKbps,
+            congestionPressure = 0.85f,
+            dynamicEnabled = true
+        )
+        assertTrue("Expected bitrate reduction on congestion, got $steppedDown", steppedDown < baseKbps)
+
+        val recovered = AdaptiveQualityEngine.evaluateNetworkAbr(
+            currentBitrateKbps = steppedDown,
+            configuredBaseKbps = baseKbps,
+            congestionPressure = 0.0f,
+            dynamicEnabled = true
+        )
+        assertTrue("Expected gradual recovery, got $recovered <= $steppedDown", recovered > steppedDown)
+        assertTrue(recovered <= baseKbps)
     }
 
     @Test

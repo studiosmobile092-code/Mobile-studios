@@ -6,6 +6,8 @@ import android.media.MediaFormat
 import android.net.Uri
 import com.example.mobilelabs.model.AppProfile
 import com.example.mobilelabs.model.AudioFilterConfig
+import com.example.mobilelabs.model.AudioMonitoringMode
+import com.example.mobilelabs.model.CameraWhiteBalanceMode
 import com.example.mobilelabs.model.DownscaleFilter
 import com.example.mobilelabs.model.FacecamShape
 import com.example.mobilelabs.model.IncompleteRecording
@@ -24,6 +26,7 @@ import com.example.mobilelabs.model.SourceType
 import com.example.mobilelabs.model.TransitionType
 import com.example.mobilelabs.model.VideoConfig
 import com.example.mobilelabs.model.VideoFilterConfig
+import com.example.mobilelabs.model.VoiceEffectPreset
 import com.example.mobilelabs.model.defaultSceneCollection
 import com.example.mobilelabs.model.defaultSoundboardPads
 import org.json.JSONArray
@@ -175,6 +178,12 @@ class SceneCollectionRepository(private val context: Context) {
                                     put("borderWidthPx", src.borderWidthPx.toDouble())
                                     put("borderColorArgb", src.borderColorArgb)
                                     put("mirrorHorizontal", src.mirrorHorizontal)
+                                    put("camExposureEv", src.camExposureEv)
+                                    put("camIso", src.camIso)
+                                    put("camFocusDistance", src.camFocusDistance.toDouble())
+                                    put("camWhiteBalance", src.camWhiteBalance.name)
+                                    put("camZoomRatio", src.camZoomRatio.toDouble())
+                                    put("camTorchEnabled", src.camTorchEnabled)
                                     put("mediaPathOrUri", src.mediaPathOrUri)
                                     put("mediaLoop", src.mediaLoop)
                                     put("mediaMuted", src.mediaMuted)
@@ -195,6 +204,11 @@ class SceneCollectionRepository(private val context: Context) {
                                     put("scoreAwayName", src.scoreAwayName)
                                     put("scoreHome", src.scoreHome)
                                     put("scoreAway", src.scoreAway)
+                                    put("goalTitle", src.goalTitle)
+                                    put("goalCurrent", src.goalCurrent)
+                                    put("goalTarget", src.goalTarget)
+                                    put("goalAccentColorArgb", src.goalAccentColorArgb)
+                                    put("alertShowChime", src.alertShowChime)
                                     put("drawingBrushColorArgb", src.drawingBrushColorArgb)
                                     put("drawingBrushSizePx", src.drawingBrushSizePx.toDouble())
                                     put("chatOverlayOpacity", src.chatOverlayOpacity.toDouble())
@@ -261,6 +275,16 @@ class SceneCollectionRepository(private val context: Context) {
                                     borderWidthPx = srcObj.optDouble("borderWidthPx", 0.0).toFloat(),
                                     borderColorArgb = srcObj.optLong("borderColorArgb", 0xFFCC1B1BL),
                                     mirrorHorizontal = srcObj.optBoolean("mirrorHorizontal", false),
+                                    camExposureEv = srcObj.optInt("camExposureEv", 0),
+                                    camIso = srcObj.optInt("camIso", 0),
+                                    camFocusDistance = srcObj.optDouble("camFocusDistance", -1.0).toFloat(),
+                                    camWhiteBalance = runCatching {
+                                        CameraWhiteBalanceMode.valueOf(
+                                            srcObj.optString("camWhiteBalance", CameraWhiteBalanceMode.AUTO.name)
+                                        )
+                                    }.getOrDefault(CameraWhiteBalanceMode.AUTO),
+                                    camZoomRatio = srcObj.optDouble("camZoomRatio", 1.0).toFloat().coerceIn(1f, 4f),
+                                    camTorchEnabled = srcObj.optBoolean("camTorchEnabled", false),
                                     mediaPathOrUri = mediaPath,
                                     mediaLoop = srcObj.optBoolean("mediaLoop", true),
                                     mediaMuted = srcObj.optBoolean("mediaMuted", false),
@@ -281,6 +305,11 @@ class SceneCollectionRepository(private val context: Context) {
                                     scoreAwayName = srcObj.optString("scoreAwayName", "P2"),
                                     scoreHome = srcObj.optInt("scoreHome", 0),
                                     scoreAway = srcObj.optInt("scoreAway", 0),
+                                    goalTitle = srcObj.optString("goalTitle", "FOLLOWER GOAL"),
+                                    goalCurrent = srcObj.optInt("goalCurrent", 42),
+                                    goalTarget = srcObj.optInt("goalTarget", 100).coerceAtLeast(1),
+                                    goalAccentColorArgb = srcObj.optLong("goalAccentColorArgb", 0xFF9146FFL),
+                                    alertShowChime = srcObj.optBoolean("alertShowChime", true),
                                     drawingBrushColorArgb = srcObj.optLong("drawingBrushColorArgb", 0xFFFF3B30L),
                                     drawingBrushSizePx = srcObj.optDouble("drawingBrushSizePx", 10.0).toFloat(),
                                     chatOverlayOpacity = srcObj.optDouble("chatOverlayOpacity", 0.72).toFloat(),
@@ -532,6 +561,8 @@ class SceneCollectionRepository(private val context: Context) {
         put("recordingFormat", vc.recordingFormat.name)
         put("dynamicBitrateEnabled", vc.dynamicBitrateEnabled)
         put("lowLatencyNetworkMode", vc.lowLatencyNetworkMode)
+        put("multiTrackAudioEnabled", vc.multiTrackAudioEnabled)
+        put("skipGoLivePreFlight", vc.skipGoLivePreFlight)
     }
 
     private fun decodeVideoConfig(obj: JSONObject): VideoConfig {
@@ -562,7 +593,9 @@ class SceneCollectionRepository(private val context: Context) {
             screenCropOffsetYFraction = obj.optDouble("screenCropOffsetY", 0.5).toFloat(),
             recordingFormat = recFmt,
             dynamicBitrateEnabled = obj.optBoolean("dynamicBitrateEnabled", true),
-            lowLatencyNetworkMode = obj.optBoolean("lowLatencyNetworkMode", true)
+            lowLatencyNetworkMode = obj.optBoolean("lowLatencyNetworkMode", true),
+            multiTrackAudioEnabled = obj.optBoolean("multiTrackAudioEnabled", false),
+            skipGoLivePreFlight = obj.optBoolean("skipGoLivePreFlight", false)
         )
     }
 
@@ -582,6 +615,13 @@ class SceneCollectionRepository(private val context: Context) {
         put("autoDuckingEnabled", f.autoDuckingEnabled)
         put("duckAmountDb", f.duckAmountDb.toDouble())
         put("pushToTalkEnabled", f.pushToTalkEnabled)
+        put("eqEnabled", f.eqEnabled)
+        put("eqLowDb", f.eqLowDb.toDouble())
+        put("eqMidDb", f.eqMidDb.toDouble())
+        put("eqHighDb", f.eqHighDb.toDouble())
+        put("voiceEffect", f.voiceEffect.name)
+        put("reverbMix", f.reverbMix.toDouble())
+        put("monitoringMode", f.monitoringMode.name)
     }
 
     private fun decodeAudioFilter(obj: JSONObject): AudioFilterConfig = AudioFilterConfig(
@@ -599,7 +639,18 @@ class SceneCollectionRepository(private val context: Context) {
         limiterCeilingDb = obj.optDouble("limiterCeilingDb", -1.5).toFloat(),
         autoDuckingEnabled = obj.optBoolean("autoDuckingEnabled", false),
         duckAmountDb = obj.optDouble("duckAmountDb", -10.0).toFloat(),
-        pushToTalkEnabled = obj.optBoolean("pushToTalkEnabled", false)
+        pushToTalkEnabled = obj.optBoolean("pushToTalkEnabled", false),
+        eqEnabled = obj.optBoolean("eqEnabled", false),
+        eqLowDb = obj.optDouble("eqLowDb", 0.0).toFloat().coerceIn(-12f, 12f),
+        eqMidDb = obj.optDouble("eqMidDb", 0.0).toFloat().coerceIn(-12f, 12f),
+        eqHighDb = obj.optDouble("eqHighDb", 0.0).toFloat().coerceIn(-12f, 12f),
+        voiceEffect = runCatching {
+            VoiceEffectPreset.valueOf(obj.optString("voiceEffect", VoiceEffectPreset.NONE.name))
+        }.getOrDefault(VoiceEffectPreset.NONE),
+        reverbMix = obj.optDouble("reverbMix", 0.22).toFloat().coerceIn(0f, 0.7f),
+        monitoringMode = runCatching {
+            AudioMonitoringMode.valueOf(obj.optString("monitoringMode", AudioMonitoringMode.OFF.name))
+        }.getOrDefault(AudioMonitoringMode.OFF)
     )
 
     private fun encodeVideoFilters(f: VideoFilterConfig): JSONObject = JSONObject().apply {
@@ -619,6 +670,8 @@ class SceneCollectionRepository(private val context: Context) {
         put("chromaSpill", f.chromaSpill.toDouble())
         put("sharpenEnabled", f.sharpenEnabled)
         put("sharpenAmount", f.sharpenAmount.toDouble())
+        put("beautyEnabled", f.beautyEnabled)
+        put("beautyStrength", f.beautyStrength.toDouble())
         put("lutEnabled", f.lutEnabled)
         put("lutPreset", f.lutPreset.name)
         put("lutIntensity", f.lutIntensity.toDouble())
@@ -645,6 +698,8 @@ class SceneCollectionRepository(private val context: Context) {
             chromaSpill = obj.optDouble("chromaSpill", 0.15).toFloat(),
             sharpenEnabled = obj.optBoolean("sharpenEnabled", false),
             sharpenAmount = obj.optDouble("sharpenAmount", 0.35).toFloat(),
+            beautyEnabled = obj.optBoolean("beautyEnabled", false),
+            beautyStrength = obj.optDouble("beautyStrength", 0.45).toFloat().coerceIn(0f, 1f),
             lutEnabled = obj.optBoolean("lutEnabled", false),
             lutPreset = runCatching {
                 LutPreset.valueOf(obj.optString("lutPreset", "NONE"))

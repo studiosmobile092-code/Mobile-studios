@@ -187,4 +187,36 @@ class AdaptiveQualityEngine {
         if (history.size >= 24) history.removeFirst()
         history.addLast(entry)
     }
+
+    companion object {
+        /**
+         * Pure Network ABR step-down & smooth recovery calculator:
+         * Steps bitrate down promptly when RTMP congestion pressure >= 0.35 or frames drop,
+         * and gently recovers up toward baseBitrateKbps when queue stays clear.
+         */
+        fun evaluateNetworkAbr(
+            baseBitrateKbps: Int,
+            currentTargetKbps: Int,
+            congestionPressure: Float,
+            queueDepth: Int,
+            recentDropDelta: Long
+        ): Int {
+            val ceiling = baseBitrateKbps.coerceAtLeast(800)
+            val floor = (ceiling * 0.35f).toInt().coerceAtLeast(600)
+            val active = (if (currentTargetKbps <= 0) ceiling else currentTargetKbps).coerceIn(floor, ceiling)
+
+            return when {
+                recentDropDelta > 0L || congestionPressure >= 0.55f || queueDepth >= 60 -> {
+                    (active * 0.78f).toInt().coerceIn(floor, ceiling)
+                }
+                congestionPressure >= 0.30f || queueDepth >= 28 -> {
+                    (active * 0.88f).toInt().coerceIn(floor, ceiling)
+                }
+                congestionPressure < 0.12f && queueDepth < 8 && active < ceiling -> {
+                    minOf(ceiling, active + maxOf(150, (ceiling * 0.06f).toInt()))
+                }
+                else -> active
+            }
+        }
+    }
 }

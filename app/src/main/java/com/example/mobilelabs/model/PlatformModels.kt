@@ -81,3 +81,34 @@ data class DrawingStroke(
     val strokeWidthFraction: Float,
     val points: List<Pair<Float, Float>>
 )
+
+@Immutable
+data class TwitchDeviceAuthState(
+    val active: Boolean = false,
+    val userCode: String = "",
+    val deviceCode: String = "",
+    val verificationUri: String = "https://www.twitch.tv/activate",
+    val expiresAtMs: Long = 0L,
+    val polling: Boolean = false,
+    val error: String? = null
+)
+
+enum class AlertEventType(val label: String, val accentArgb: Long) {
+    FOLLOWER("NEW FOLLOWER", 0xFF9146FFL),
+    SUBSCRIBER("NEW SUBSCRIBER", 0xFF00C853L),
+    DONATION("SUPER CHAT / TIP", 0xFFFFB300L),
+    RAID("INCOMING RAID", 0xFFE91E63L),
+    MILESTONE("GOAL MILESTONE", 0xFF29B6F6L)
+}
+
+@Immutable
+data class StreamAlertEvent(
+    val id: String,
+    val type: AlertEventType,
+    val platform: StreamingPlatform = StreamingPlatform.TWITCH,
+    val senderName: String,
+    val detailText: String,
+    val createdAtMs: Long = System.currentTimeMillis(),
+    val durationMs: Long = 4500L
+)
+

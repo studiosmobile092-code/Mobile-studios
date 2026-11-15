@@ -7,6 +7,20 @@ import androidx.compose.runtime.Immutable
  * All filters are OFF by default (Spec §12.2 M2.3 Gate) and execute strictly on the
  * audio DSP path or GLES3 GPU fragment shader (zero CPU pixel copies).
  */
+enum class VoiceEffectPreset(val label: String) {
+    NONE("Natural"),
+    BROADCAST_RADIO("Broadcast Radio"),
+    DEEP_BASS("Deep Bass"),
+    HIGH_PITCH("High Pitch"),
+    STUDIO_REVERB("Studio Reverb")
+}
+
+enum class AudioMonitoringMode(val label: String) {
+    OFF("Monitor Off"),
+    MONITOR_ONLY("Monitor Only (Mute Output)"),
+    MONITOR_AND_OUTPUT("Monitor & Output")
+}
+
 @Immutable
 data class AudioFilterConfig(
     val gainEnabled: Boolean = false,
@@ -23,11 +37,19 @@ data class AudioFilterConfig(
     val limiterCeilingDb: Float = -1.5f,
     val autoDuckingEnabled: Boolean = false,
     val duckAmountDb: Float = -10f,
-    val pushToTalkEnabled: Boolean = false
+    val pushToTalkEnabled: Boolean = false,
+    val eqEnabled: Boolean = false,
+    val eqLowDb: Float = 0f,
+    val eqMidDb: Float = 0f,
+    val eqHighDb: Float = 0f,
+    val voiceEffect: VoiceEffectPreset = VoiceEffectPreset.NONE,
+    val reverbMix: Float = 0.22f,
+    val monitoringMode: AudioMonitoringMode = AudioMonitoringMode.OFF
 ) {
     fun anyActive(): Boolean =
         gainEnabled || noiseSuppressionEnabled || noiseGateEnabled ||
-            compressorEnabled || limiterEnabled || autoDuckingEnabled || pushToTalkEnabled
+            compressorEnabled || limiterEnabled || autoDuckingEnabled || pushToTalkEnabled ||
+            eqEnabled || voiceEffect != VoiceEffectPreset.NONE
 
     fun activeSummary(): String {
         val parts = buildList {
@@ -36,8 +58,11 @@ data class AudioFilterConfig(
             if (noiseGateEnabled) add("Gate")
             if (compressorEnabled) add("Comp")
             if (limiterEnabled) add("Lim")
+            if (eqEnabled) add("3B-EQ")
+            if (voiceEffect != VoiceEffectPreset.NONE) add(voiceEffect.label)
             if (autoDuckingEnabled) add("Duck")
             if (pushToTalkEnabled) add("PTT")
+            if (monitoringMode != AudioMonitoringMode.OFF) add("Mon")
         }
         return if (parts.isEmpty()) "Filters: Off" else parts.joinToString(" · ")
     }
@@ -48,7 +73,10 @@ enum class LutPreset(val label: String) {
     VIVID_GAMING("Vivid Gaming"),
     TEAL_ORANGE("Teal & Orange"),
     CRISP_MONO("Crisp Mono"),
-    WARM_CINEMA("Warm Cinema")
+    WARM_CINEMA("Warm Cinema"),
+    CYBERPUNK_NEON("Cyberpunk Neon"),
+    PASTEL_IRL("Pastel IRL"),
+    HDR_BOOST("HDR Contrast")
 }
 
 enum class ScaleFilterType(val label: String) {
@@ -75,13 +103,15 @@ data class VideoFilterConfig(
     val chromaSpill: Float = 0.15f,
     val sharpenEnabled: Boolean = false,
     val sharpenAmount: Float = 0.35f,
+    val beautyEnabled: Boolean = false,
+    val beautyStrength: Float = 0.45f,
     val lutEnabled: Boolean = false,
     val lutPreset: LutPreset = LutPreset.NONE,
     val lutIntensity: Float = 0.7f
 ) {
     fun anyActive(): Boolean =
         colorCorrectionEnabled || cropPadEnabled || scaleAspectEnabled ||
-            chromaKeyEnabled || sharpenEnabled || (lutEnabled && lutPreset != LutPreset.NONE)
+            chromaKeyEnabled || sharpenEnabled || beautyEnabled || (lutEnabled && lutPreset != LutPreset.NONE)
 
     fun activeTags(): List<String> = buildList {
         if (colorCorrectionEnabled) add("Color")
@@ -89,6 +119,7 @@ data class VideoFilterConfig(
         if (scaleAspectEnabled) add(scaleFilter.label)
         if (chromaKeyEnabled) add("ChromaKey")
         if (sharpenEnabled) add("Sharpen")
+        if (beautyEnabled) add("Beauty")
         if (lutEnabled && lutPreset != LutPreset.NONE) add("LUT:${lutPreset.label}")
     }
 }

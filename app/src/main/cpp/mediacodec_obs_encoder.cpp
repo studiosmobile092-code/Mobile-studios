@@ -462,6 +462,21 @@ bool ml_enc_encode_texture(
     return true;
 }
 
+#if defined(LIBOBS_API_VER) && LIBOBS_API_VER >= MAKE_SEMANTIC_VERSION(30, 0, 0)
+bool ml_enc_encode_texture2(
+    void *data,
+    struct encoder_texture *texture,
+    int64_t pts,
+    uint64_t lock_key,
+    uint64_t *next_key,
+    struct encoder_packet *packet,
+    bool *received_packet
+) {
+    uint32_t handle = texture ? texture->tex[0] : 0;
+    return ml_enc_encode_texture(data, handle, pts, lock_key, next_key, packet, received_packet);
+}
+#endif
+
 bool ml_enc_get_extra_data(void *data, uint8_t **extra_data, size_t *size) {
     auto *ctx = static_cast<MobileLabsMediaCodecEncoder *>(data);
     if (!ctx) return false;
@@ -487,7 +502,11 @@ void mobilelabs_register_mediacodec_encoder(void) {
     info.update = ml_enc_update;
     info.get_defaults = ml_enc_get_defaults;
     info.get_extra_data = ml_enc_get_extra_data;
+#if defined(LIBOBS_API_VER) && LIBOBS_API_VER >= MAKE_SEMANTIC_VERSION(30, 0, 0)
+    info.encode_texture2 = ml_enc_encode_texture2;
+#else
     info.encode_texture = ml_enc_encode_texture;
+#endif
     info.caps = OBS_ENCODER_CAP_PASS_TEXTURE;
     obs_register_encoder(&info);
 }

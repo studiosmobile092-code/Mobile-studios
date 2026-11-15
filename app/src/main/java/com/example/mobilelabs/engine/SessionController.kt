@@ -22,9 +22,11 @@ import com.example.mobilelabs.diagnostics.DiagnosticsExporter
 import com.example.mobilelabs.diagnostics.LocalCrashHandler
 import com.example.mobilelabs.media.AudioCaptureMixer
 import com.example.mobilelabs.media.Camera2SourceController
+import com.example.mobilelabs.media.CameraProSettings
 import com.example.mobilelabs.media.GlZeroCopyCompositor
 import com.example.mobilelabs.media.HardwareMediaPipeline
 import com.example.mobilelabs.media.OffscreenBrowserSourceController
+import com.example.mobilelabs.model.AlertEventType
 import com.example.mobilelabs.model.AppProfile
 import com.example.mobilelabs.model.AudioChannelState
 import com.example.mobilelabs.model.AudioFilterConfig
@@ -48,6 +50,7 @@ import com.example.mobilelabs.model.SoundboardPad
 import com.example.mobilelabs.model.SourceModel
 import com.example.mobilelabs.model.SourceTransform
 import com.example.mobilelabs.model.SourceType
+import com.example.mobilelabs.model.StreamAlertEvent
 import com.example.mobilelabs.model.StreamingPlatform
 import com.example.mobilelabs.model.ThermalSummary
 import com.example.mobilelabs.model.TransitionType
@@ -118,6 +121,7 @@ class SessionController(private val context: Context) {
 
     private var telemetryJob: Job? = null
     private var reconnectJob: Job? = null
+    private var alertClearJob: Job? = null
     private var streamStartedAtMs = 0L
     private var recordStartedAtMs = 0L
     private var recordTotalPausedMs = 0L
@@ -126,7 +130,6 @@ class SessionController(private val context: Context) {
     private var drawingVersionCounter = 0L
     private var reconnectCount = 0
     private var lastNetworkDropSeen = 0L
-    private var cleanNetworkSeconds = 0
     private var dynamicTargetBitrateKbps = 0
     private var overlayLandscapePos = Pair(24, 180)
     private var overlayPortraitPos = Pair(24, 240)
@@ -370,11 +373,16 @@ class SessionController(private val context: Context) {
         pipe.startEncoders(cfg)
         dynamicTargetBitrateKbps = cfg.videoBitrateKbps
         lastNetworkDropSeen = 0L
-        cleanNetworkSeconds = 0
 
-        val mixer = AudioCaptureMixer(context) { pcm, count, ptsUs ->
-            pipe.pushAudioPcm(pcm, count, ptsUs)
-        }.apply {
+        val mixer = AudioCaptureMixer(
+            context = context,
+            onEncodedPcmChunk = { pcm, count, ptsUs ->
+                pipe.pushAudioPcm(pcm, count, ptsUs)
+            },
+            onIsolatedAudioTracksPcm = { micPcm, gamePcm, count, ptsUs ->
+                pipe.pushIsolatedAudioPcm(micPcm, gamePcm, count, ptsUs)
+            }
+        ).apply {
             val gCh = st.audioChannels.firstOrNull { it.id == "audio_game" }
             val mCh = st.audioChannels.firstOrNull { it.id == "audio_mic" }
             if (gCh != null) {
@@ -428,6 +436,33 @@ class SessionController(private val context: Context) {
             )
         }
         logEvent("Capture armed (${cfg.canvasWidth}x${cfg.canvasHeight} -> ${cfg.outputWidth}x${cfg.outputHeight} @${cfg.fps})")
+    }
+
+    fun requestGoLive() {
+        val st = _uiState.value
+        if (st.sessionPhase != SessionPhase.ARMED && st.sessionPhase != SessionPhase.RECONNECTING) return
+        if (st.videoConfig.skipGoLivePreFlight) {
+            startStreaming()
+        } else {
+            _uiState.update { it.copy(showPreFlightSheet = true) }
+        }
+    }
+
+    fun dismissPreFlightSheet() {
+        _uiState.update { it.copy(showPreFlightSheet = false) }
+    }
+
+    fun confirmGoLiveFromPreFlight() {
+        _uiState.update { it.copy(showPreFlightSheet = false) }
+        startStreaming()
+    }
+
+    fun setSkipGoLivePreFlight(skip: Boolean) {
+        updateVideoConfig(_uiState.value.videoConfig.copy(skipGoLivePreFlight = skip))
+    }
+
+    fun setMultiTrackAudioEnabled(enabled: Boolean) {
+        updateVideoConfig(_uiState.value.videoConfig.copy(multiTrackAudioEnabled = enabled))
     }
 
     fun startStreaming() {
@@ -1545,6 +1580,12 @@ class SessionController(private val context: Context) {
 
     fun updateSourceProperties(sourceId: String, updater: (SourceModel) -> SourceModel) {
         mutateEditableSource(sourceId, updater)
+        val st = _uiState.value
+        val activeScene = st.sceneCollection.scenes.firstOrNull { it.id == editableSceneId(st) }
+        val updatedSrc = activeScene?.sources?.firstOrNull { it.id == sourceId }
+        if (updatedSrc?.type == SourceType.CAMERA_2 && updatedSrc.visible) {
+            cameraController?.updateProSettings(cameraProFromSource(updatedSrc))
+        }
     }
 
     fun updateSourceVideoFilters(sourceId: String, filters: VideoFilterConfig) {
@@ -1873,8 +1914,11 @@ class SessionController(private val context: Context) {
         syncActiveCameraSource()
     }
 
-    // 1-Click OAuth Platform Connections, Unified Live Chat, Pro Widgets, Drawing Ink, Soundboard, PTT
+    // 1-Click OAuth Platform Connections, Twitch Device Code, Unified Live Chat, Alerts, Goals
     fun startPlatformOAuth(platform: StreamingPlatform) = platformCoordinator.startPlatformOAuth(platform)
+    fun startTwitchDeviceAuth() = platformCoordinator.startTwitchDeviceAuth()
+    fun cancelTwitchDeviceAuth() = platformCoordinator.cancelTwitchDeviceAuth()
+    fun openExternalUrl(url: String) = platformCoordinator.openExternalUrl(url)
     fun handleOAuthRedirect(uri: Uri) = platformCoordinator.handleOAuthRedirect(uri)
     fun disconnectPlatform(platform: StreamingPlatform) = platformCoordinator.disconnectPlatform(platform)
     fun saveCustomClientId(platform: StreamingPlatform, clientId: String) =
@@ -1889,6 +1933,76 @@ class SessionController(private val context: Context) {
         categoryName: String,
         privacyStatus: String
     ) = platformCoordinator.updatePlatformBroadcastMeta(platform, title, categoryId, categoryName, privacyStatus)
+
+    fun triggerStreamAlert(
+        type: AlertEventType,
+        platform: StreamingPlatform = StreamingPlatform.TWITCH,
+        senderName: String,
+        detailText: String = ""
+    ) {
+        val ev = StreamAlertEvent(
+            id = "alert_${System.nanoTime()}",
+            type = type,
+            platform = platform,
+            senderName = senderName.ifBlank { "Anonymous Supporter" },
+            detailText = detailText.ifBlank { type.label }
+        )
+        compositor.updateAlertEvent(ev)
+        _uiState.update { cur ->
+            val updatedCol = if (type == AlertEventType.FOLLOWER || type == AlertEventType.SUBSCRIBER) {
+                cur.sceneCollection.copy(
+                    scenes = cur.sceneCollection.scenes.map { sc ->
+                        sc.copy(
+                            sources = sc.sources.map { src ->
+                                if (src.type == SourceType.GOAL_BAR) src.copy(goalCurrent = src.goalCurrent + 1) else src
+                            }
+                        )
+                    }
+                )
+            } else cur.sceneCollection
+            val alertHasChime = updatedCol.scenes
+                .flatMap { it.sources }
+                .any { it.type == SourceType.ALERT_BOX && it.visible && it.alertShowChime }
+            if (alertHasChime) {
+                audioMixer?.triggerSoundboardPad(SoundboardPad("alert_chime", "Alert Chime", builtInTone = "CHIME", volume = 0.7f))
+            }
+            cur.copy(
+                sceneCollection = updatedCol,
+                activeAlertEvent = ev,
+                alertHistory = (listOf(ev) + cur.alertHistory).take(15),
+                statusMessage = "Alert: ${ev.type.label} · ${ev.senderName}"
+            )
+        }
+        syncCompositorScenes()
+        logEvent("Stream Alert: ${ev.type.label} (${ev.senderName})")
+
+        alertClearJob?.cancel()
+        alertClearJob = scope.launch {
+            delay(ev.durationMs)
+            if (_uiState.value.activeAlertEvent?.id == ev.id) {
+                compositor.updateAlertEvent(null)
+                _uiState.update { it.copy(activeAlertEvent = null) }
+            }
+        }
+    }
+
+    fun triggerTestAlert(type: AlertEventType = AlertEventType.FOLLOWER) {
+        val sampleName = when (type) {
+            AlertEventType.FOLLOWER -> "GalaxyGamer99"
+            AlertEventType.SUBSCRIBER -> "ProCreator_VIP"
+            AlertEventType.DONATION -> "$10.00 Super Chat"
+            AlertEventType.RAID -> "StreamSquad (+45)"
+            AlertEventType.MILESTONE -> "100 Followers Reached!"
+        }
+        val samplePlat = if (type == AlertEventType.DONATION) StreamingPlatform.YOUTUBE else StreamingPlatform.TWITCH
+        triggerStreamAlert(type, samplePlat, sampleName, "Test Broadcast Alert · Mobile Labs")
+    }
+
+    fun adjustGoalProgress(sourceId: String, delta: Int) {
+        mutateEditableSource(sourceId) { src ->
+            src.copy(goalCurrent = (src.goalCurrent + delta).coerceAtLeast(0))
+        }
+    }
 
     fun toggleChatDrawer() {
         _uiState.update { it.copy(chatDrawerOpen = !it.chatDrawerOpen) }
@@ -2124,6 +2238,15 @@ class SessionController(private val context: Context) {
         }
     }
 
+    private fun cameraProFromSource(src: SourceModel): CameraProSettings = CameraProSettings(
+        exposureEv = src.camExposureEv,
+        iso = src.camIso,
+        focusDistance = src.camFocusDistance,
+        whiteBalance = src.camWhiteBalance,
+        zoomRatio = src.camZoomRatio,
+        torchEnabled = src.camTorchEnabled
+    )
+
     private fun syncActiveCameraSource() {
         val st = _uiState.value
         val prog = st.sceneCollection.scenes.firstOrNull { it.id == st.programSceneId }
@@ -2135,7 +2258,7 @@ class SessionController(private val context: Context) {
         } else {
             val surf = cameraSurfaceRef
             if (surf != null && st.hasCameraPermission) {
-                cameraController?.start(camSrc.useFrontCamera, surf)
+                cameraController?.start(camSrc.useFrontCamera, surf, cameraProFromSource(camSrc))
             }
         }
     }
@@ -2324,25 +2447,20 @@ class SessionController(private val context: Context) {
                 .toInt().coerceAtLeast(1500)
             val dropsDelta = snapshot.networkDroppedFrames - lastNetworkDropSeen
             lastNetworkDropSeen = snapshot.networkDroppedFrames
-            val congested = dropsDelta > 0 || snapshot.rtmpBufferedBytes > 256_000L
-            if (congested) {
-                cleanNetworkSeconds = 0
-                val reduced = ((dynamicTargetBitrateKbps.takeIf { it > 0 } ?: ceilingBitrate) * 0.85f)
-                    .toInt().coerceAtLeast(1500)
-                if (reduced < dynamicTargetBitrateKbps || dynamicTargetBitrateKbps == 0) {
-                    dynamicTargetBitrateKbps = reduced
-                    pipe.updateLiveBitrate(reduced)
-                    logEvent("Dynamic Bitrate step-down -> ${reduced} kbps (uplink congestion)")
-                }
-            } else if (dynamicTargetBitrateKbps in 1 until ceilingBitrate) {
-                cleanNetworkSeconds++
-                if (cleanNetworkSeconds >= 10) {
-                    cleanNetworkSeconds = 0
-                    val steppedUp = minOf(ceilingBitrate, dynamicTargetBitrateKbps + 400)
-                    dynamicTargetBitrateKbps = steppedUp
-                    pipe.updateLiveBitrate(steppedUp)
-                    logEvent("Dynamic Bitrate recovery -> ${steppedUp} kbps")
-                }
+            val pressure = pipe.getMaxCongestionPressure()
+            val prevAbr = dynamicTargetBitrateKbps.takeIf { it > 0 } ?: ceilingBitrate
+            val nextAbr = AdaptiveQualityEngine.evaluateNetworkAbr(
+                baseBitrateKbps = ceilingBitrate,
+                currentTargetKbps = prevAbr,
+                congestionPressure = pressure,
+                queueDepth = snapshot.encoderQueueDepth,
+                recentDropDelta = dropsDelta
+            )
+            if (nextAbr != prevAbr) {
+                dynamicTargetBitrateKbps = nextAbr
+                pipe.updateLiveBitrate(nextAbr)
+                val dir = if (nextAbr < prevAbr) "step-down" else "recovery"
+                logEvent("Dynamic Bitrate $dir -> $nextAbr kbps (queue=${snapshot.encoderQueueDepth}, pressure=${"%.2f".format(pressure)})")
             }
         }
 
@@ -2364,6 +2482,7 @@ class SessionController(private val context: Context) {
             audioChannels = liveChannels,
             adaptiveQuality = adaptiveOutcome.state,
             dualDestination = updatedDual,
+            abrTargetBitrateKbps = dynamicTargetBitrateKbps.takeIf { it > 0 } ?: cur.videoConfig.videoBitrateKbps,
             replayBuffer = _uiState.value.replayBuffer.copy(
                 bufferedSeconds = replayStats?.bufferedSeconds ?: 0f,
                 bufferedKb = replayStats?.bufferedKb ?: 0L

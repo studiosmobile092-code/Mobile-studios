@@ -18,9 +18,11 @@ import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
 import androidx.core.graphics.createBitmap
+import androidx.core.net.toUri
 import com.example.mobilelabs.model.DrawingStroke
 import com.example.mobilelabs.model.PlatformChatMessage
 import com.example.mobilelabs.model.SourceModel
+import com.example.mobilelabs.model.StreamAlertEvent
 import com.example.mobilelabs.model.StreamingPlatform
 import java.io.File
 import java.io.InputStream
@@ -213,6 +215,100 @@ object DynamicSourceRenderer {
         return bmp
     }
 
+    fun renderAlertBoxBitmap(event: StreamAlertEvent?): Bitmap {
+        val width = 640
+        val height = 160
+        val bmp = createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        if (event == null) {
+            return bmp // Transparent when idle
+        }
+        val canvas = Canvas(bmp)
+        val accent = event.type.accentArgb.toInt()
+        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xEB10141F.toInt() }
+        val accentPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = accent }
+        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 4f
+            color = accent
+        }
+
+        val outer = RectF(6f, 6f, width - 6f, height - 6f)
+        canvas.drawRoundRect(outer, 24f, 24f, bgPaint)
+        canvas.drawRoundRect(RectF(6f, 6f, 22f, height - 6f), 12f, 12f, accentPaint)
+        canvas.drawRoundRect(outer, 24f, 24f, borderPaint)
+
+        val badgePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = accent
+            textSize = 20f
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        }
+        val platTag = if (event.platform == StreamingPlatform.YOUTUBE) "YOUTUBE" else "TWITCH"
+        canvas.drawText("$platTag · ${event.type.label}", 42f, 44f, badgePaint)
+
+        val senderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = 40f
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        }
+        canvas.drawText(event.senderName.take(24), 42f, 94f, senderPaint)
+
+        if (event.detailText.isNotBlank()) {
+            val detailPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = 0xFFD5DCE8.toInt()
+                textSize = 24f
+            }
+            canvas.drawText(event.detailText.take(44), 42f, 132f, detailPaint)
+        }
+        return bmp
+    }
+
+    fun renderGoalBarBitmap(src: SourceModel): Bitmap {
+        val width = 620
+        val height = 108
+        val bmp = createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+
+        val target = src.goalTarget.coerceAtLeast(1)
+        val current = src.goalCurrent.coerceAtLeast(0)
+        val fraction = (current.toFloat() / target.toFloat()).coerceIn(0f, 1f)
+        val pct = ((current.toFloat() / target.toFloat()) * 100f).toInt().coerceAtMost(999)
+
+        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xE011141C.toInt() }
+        val trackPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF272E3F.toInt() }
+        val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = src.goalAccentColorArgb.toInt() }
+        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 2.5f
+            color = 0xFF3E4961.toInt()
+        }
+
+        val outer = RectF(4f, 4f, width - 4f, height - 4f)
+        canvas.drawRoundRect(outer, 20f, 20f, bgPaint)
+        canvas.drawRoundRect(outer, 20f, 20f, borderPaint)
+
+        val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = 23f
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        }
+        val countPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xFFE2E8F0.toInt()
+            textSize = 23f
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            textAlign = Paint.Align.RIGHT
+        }
+        canvas.drawText(src.goalTitle.ifBlank { "STREAM GOAL" }.take(28), 22f, 38f, titlePaint)
+        canvas.drawText("$current / $target ($pct%)", width - 22f, 38f, countPaint)
+
+        val barRect = RectF(20f, 54f, width - 20f, 88f)
+        canvas.drawRoundRect(barRect, 14f, 14f, trackPaint)
+        if (fraction > 0.01f) {
+            val fillRight = (barRect.left + barRect.width() * fraction).coerceAtLeast(barRect.left + 20f)
+            canvas.drawRoundRect(RectF(barRect.left, barRect.top, fillRight, barRect.bottom), 14f, 14f, fillPaint)
+        }
+        return bmp
+    }
+
     fun renderDrawingBitmap(
         strokes: List<DrawingStroke>,
         width: Int,
@@ -303,7 +399,7 @@ object DynamicSourceRenderer {
         return runCatching {
             if (pathOrUri.endsWith(".gif", ignoreCase = true) || pathOrUri.endsWith(".webp", ignoreCase = true)) {
                 val drawable = if (pathOrUri.startsWith("content://") && context != null) {
-                    val src = ImageDecoder.createSource(context.contentResolver, Uri.parse(pathOrUri))
+                    val src = ImageDecoder.createSource(context.contentResolver, pathOrUri.toUri())
                     ImageDecoder.decodeDrawable(src)
                 } else {
                     val file = File(pathOrUri)
@@ -335,7 +431,7 @@ object DynamicSourceRenderer {
 
     private fun openInput(context: Context?, pathOrUri: String): InputStream? {
         if (pathOrUri.startsWith("content://")) {
-            return context?.contentResolver?.openInputStream(Uri.parse(pathOrUri))
+            return context?.contentResolver?.openInputStream(pathOrUri.toUri())
         }
         val f = File(pathOrUri)
         return if (f.exists() && f.canRead()) f.inputStream() else null

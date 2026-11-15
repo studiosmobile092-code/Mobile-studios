@@ -106,6 +106,11 @@ data class WorkspaceCallbacks(
     val onAttachPreviewSurface: (Surface?, Int, Int) -> Unit,
     val onArmOrDisarm: () -> Unit,
     val onToggleStream: () -> Unit,
+    val onRequestGoLive: () -> Unit,
+    val onDismissPreFlightSheet: () -> Unit,
+    val onConfirmGoLiveFromPreFlight: () -> Unit,
+    val onSetSkipGoLivePreFlight: (Boolean) -> Unit,
+    val onSetMultiTrackAudioEnabled: (Boolean) -> Unit,
     val onToggleRecord: () -> Unit,
     val onPauseResumeRecord: () -> Unit,
     val onSelectScene: (String) -> Unit,
@@ -186,6 +191,9 @@ data class WorkspaceCallbacks(
     val onUpdatePlatformBroadcastMeta: (StreamingPlatform, String, String, String, String) -> Unit,
     val onSearchTwitchCategories: (String) -> Unit,
     val onSaveCustomClientId: (StreamingPlatform, String) -> Unit,
+    val onStartTwitchDeviceAuth: () -> Unit,
+    val onCancelTwitchDeviceAuth: () -> Unit,
+    val onOpenExternalUrl: (String) -> Unit,
     val onToggleChatDrawer: () -> Unit,
     val onSendChatMessage: (String, StreamingPlatform?) -> Unit,
     val onClearChatMessages: () -> Unit,
@@ -196,6 +204,8 @@ data class WorkspaceCallbacks(
     val onControlTimer: (String, String) -> Unit,
     val onAdjustScoreboard: (String, Boolean, Int) -> Unit,
     val onResetScoreboard: (String) -> Unit,
+    val onTriggerTestAlert: (com.example.mobilelabs.model.AlertEventType) -> Unit,
+    val onAdjustGoalProgress: (String, Int) -> Unit,
     val onSetDrawingMode: (Boolean) -> Unit,
     val onSetDrawingBrush: (Long, Float) -> Unit,
     val onAddDrawingStroke: (DrawingStroke) -> Unit,
@@ -364,7 +374,7 @@ fun WorkspaceScreen(
                             val busy = state.sessionPhase == SessionPhase.LIVE ||
                                 state.sessionPhase == SessionPhase.CONNECTING ||
                                 state.sessionPhase == SessionPhase.RECONNECTING
-                            if (busy) confirmStopStream = true else callbacks.onToggleStream()
+                            if (busy) confirmStopStream = true else callbacks.onRequestGoLive()
                         },
                         onToggleRecord = {
                             if (state.recordingPhase == RecordingPhase.RECORDING || state.recordingPhase == RecordingPhase.PAUSED) {
@@ -435,7 +445,9 @@ fun WorkspaceScreen(
                 onImportObsJson = callbacks.onImportObsJson,
                 onRequestEnableOverlay = callbacks.onRequestEnableOverlay,
                 onOpenAboutLicenses = { showSettings = false; showAboutLicenses = true },
-                onAudioSyncOffset = callbacks.onAudioSyncOffset
+                onAudioSyncOffset = callbacks.onAudioSyncOffset,
+                onSetMultiTrackAudioEnabled = callbacks.onSetMultiTrackAudioEnabled,
+                onSetSkipGoLivePreFlight = callbacks.onSetSkipGoLivePreFlight
             )
         )
     }
@@ -471,6 +483,9 @@ fun WorkspaceScreen(
             onUpdateBroadcastMeta = callbacks.onUpdatePlatformBroadcastMeta,
             onSearchTwitchCategories = callbacks.onSearchTwitchCategories,
             onSaveCustomClientId = callbacks.onSaveCustomClientId,
+            onStartTwitchDeviceAuth = callbacks.onStartTwitchDeviceAuth,
+            onCancelTwitchDeviceAuth = callbacks.onCancelTwitchDeviceAuth,
+            onOpenExternalUrl = callbacks.onOpenExternalUrl,
             onOpenCustomRtmpSettings = { showSettings = true }
         )
     }
@@ -492,7 +507,20 @@ fun WorkspaceScreen(
             onClearDrawingStrokes = callbacks.onClearDrawingStrokes,
             onControlTimer = callbacks.onControlTimer,
             onAdjustScoreboard = callbacks.onAdjustScoreboard,
-            onResetScoreboard = callbacks.onResetScoreboard
+            onResetScoreboard = callbacks.onResetScoreboard,
+            onTriggerTestAlert = callbacks.onTriggerTestAlert,
+            onAdjustGoalProgress = callbacks.onAdjustGoalProgress
+        )
+    }
+
+    if (state.showPreFlightSheet) {
+        GoLivePreFlightDialog(
+            state = state,
+            onDismiss = callbacks.onDismissPreFlightSheet,
+            onConfirmGoLive = callbacks.onConfirmGoLiveFromPreFlight,
+            onSetSkipPreFlight = callbacks.onSetSkipGoLivePreFlight,
+            onOpenConnections = { showConnections = true },
+            onOpenSettings = { showSettings = true }
         )
     }
 
@@ -543,7 +571,8 @@ fun WorkspaceScreen(
         )
     }
 
-    editingSourceProps?.let { src ->
+    editingSourceProps?.let { snap ->
+        val src = editableScene?.sources?.firstOrNull { it.id == snap.id } ?: snap
         SourcePropertiesDialog(
             source = src,
             onDismiss = { editingSourceProps = null },
@@ -555,6 +584,8 @@ fun WorkspaceScreen(
             onControlTimer = callbacks.onControlTimer,
             onAdjustScoreboard = callbacks.onAdjustScoreboard,
             onResetScoreboard = callbacks.onResetScoreboard,
+            onAdjustGoalProgress = callbacks.onAdjustGoalProgress,
+            onTriggerTestAlert = callbacks.onTriggerTestAlert,
             onOpenLiveChat = callbacks.onToggleChatDrawer,
             onClearDrawing = callbacks.onClearDrawingStrokes
         )
@@ -1040,6 +1071,22 @@ private fun ObsPreviewStage(
             }
         }
 
+        state.activeAlertEvent?.let { ev ->
+            Surface(
+                color = Color(ev.type.accentArgb.toInt()).copy(alpha = 0.90f),
+                shape = RoundedCornerShape(4.dp),
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp)
+            ) {
+                Text(
+                    text = "${ev.type.label}: ${ev.senderName}",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                )
+            }
+        }
+
         if (hudExpanded) {
             DiagnosticsHudCard(
                 state = state,
@@ -1121,8 +1168,13 @@ private fun ObsBottomStatusBar(
             )
         }
 
+        val bitrateText = if (isLive && state.videoConfig.dynamicBitrateEnabled && state.abrTargetBitrateKbps > 0) {
+            "${t.actualBitrateKbps}k (ABR ${state.abrTargetBitrateKbps}k)"
+        } else {
+            "${t.actualBitrateKbps}k"
+        }
         Text(
-            text = "OUT: ${t.outputWidth}x${t.outputHeight}@${t.configuredFps} · ${t.actualBitrateKbps}k",
+            text = "OUT: ${t.outputWidth}x${t.outputHeight}@${t.configuredFps} · $bitrateText",
             fontSize = 11.sp,
             color = StudioTextDim,
             modifier = Modifier.testTag("hud_real_output_text")

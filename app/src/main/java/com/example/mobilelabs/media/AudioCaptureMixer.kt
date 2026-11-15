@@ -9,24 +9,28 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
+import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaRecorder
 import android.media.audiofx.NoiseSuppressor
 import android.media.projection.MediaProjection
-import android.net.Uri
 import android.os.Build
 import android.os.Process
 import android.os.SystemClock
+import androidx.core.net.toUri
 import com.example.mobilelabs.model.AudioChannelState
 import com.example.mobilelabs.model.AudioFilterConfig
+import com.example.mobilelabs.model.AudioMonitoringMode
 import com.example.mobilelabs.model.SoundboardPad
+import com.example.mobilelabs.model.VoiceEffectPreset
 import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.log10
 import kotlin.math.max
@@ -107,8 +111,74 @@ class PcmStereoRingFifo(capacityShorts: Int = 48000 * 2 * 4) {
 }
 
 /**
+ * Zero-allocation stereo biquad filter for 3-band EQ / broadcast tone shaping.
+ */
+private class StereoBiquad {
+    private var b0 = 1f; private var b1 = 0f; private var b2 = 0f
+    private var a1 = 0f; private var a2 = 0f
+    private var z1L = 0f; private var z2L = 0f
+    private var z1R = 0f; private var z2R = 0f
+
+    fun setLowShelf(freqHz: Float, gainDb: Float, sr: Int = 48000) {
+        val a = 10.0.pow(gainDb / 40.0)
+        val w0 = 2.0 * PI * freqHz / sr
+        val alpha = sin(w0) / 2.0 * sqrt(2.0)
+        val cosW = cos(w0)
+        val twoSqrtAAlpha = 2.0 * sqrt(a) * alpha
+        val a0 = (a + 1.0) + (a - 1.0) * cosW + twoSqrtAAlpha
+        b0 = ((a * ((a + 1.0) - (a - 1.0) * cosW + twoSqrtAAlpha)) / a0).toFloat()
+        b1 = ((2.0 * a * ((a - 1.0) - (a + 1.0) * cosW)) / a0).toFloat()
+        b2 = ((a * ((a + 1.0) - (a - 1.0) * cosW - twoSqrtAAlpha)) / a0).toFloat()
+        a1 = ((-2.0 * ((a - 1.0) + (a + 1.0) * cosW)) / a0).toFloat()
+        a2 = (((a + 1.0) + (a - 1.0) * cosW - twoSqrtAAlpha) / a0).toFloat()
+    }
+
+    fun setPeakingEq(freqHz: Float, q: Float, gainDb: Float, sr: Int = 48000) {
+        val a = 10.0.pow(gainDb / 40.0)
+        val w0 = 2.0 * PI * freqHz / sr
+        val alpha = sin(w0) / (2.0 * q)
+        val cosW = cos(w0)
+        val a0 = 1.0 + alpha / a
+        b0 = ((1.0 + alpha * a) / a0).toFloat()
+        b1 = ((-2.0 * cosW) / a0).toFloat()
+        b2 = ((1.0 - alpha * a) / a0).toFloat()
+        a1 = ((-2.0 * cosW) / a0).toFloat()
+        a2 = ((1.0 - alpha / a) / a0).toFloat()
+    }
+
+    fun setHighShelf(freqHz: Float, gainDb: Float, sr: Int = 48000) {
+        val a = 10.0.pow(gainDb / 40.0)
+        val w0 = 2.0 * PI * freqHz / sr
+        val alpha = sin(w0) / 2.0 * sqrt(2.0)
+        val cosW = cos(w0)
+        val twoSqrtAAlpha = 2.0 * sqrt(a) * alpha
+        val a0 = (a + 1.0) - (a - 1.0) * cosW + twoSqrtAAlpha
+        b0 = ((a * ((a + 1.0) + (a - 1.0) * cosW + twoSqrtAAlpha)) / a0).toFloat()
+        b1 = ((-2.0 * a * ((a - 1.0) + (a + 1.0) * cosW)) / a0).toFloat()
+        b2 = ((a * ((a + 1.0) + (a - 1.0) * cosW - twoSqrtAAlpha)) / a0).toFloat()
+        a1 = ((2.0 * ((a - 1.0) - (a + 1.0) * cosW)) / a0).toFloat()
+        a2 = (((a + 1.0) - (a - 1.0) * cosW - twoSqrtAAlpha) / a0).toFloat()
+    }
+
+    fun process(sample: Float, isLeft: Boolean): Float {
+        return if (isLeft) {
+            val out = b0 * sample + z1L
+            z1L = b1 * sample - a1 * out + z2L
+            z2L = b2 * sample - a2 * out
+            out
+        } else {
+            val out = b0 * sample + z1R
+            z1R = b1 * sample - a1 * out + z2R
+            z2R = b2 * sample - a2 * out
+            out
+        }
+    }
+}
+
+/**
  * Zero-allocation inline PCM DSP filter processor:
- * Gain, 110Hz Speech High-Pass + NS, Noise Gate, Compressor, Soft-Knee Limiter.
+ * Gain, 110Hz Speech High-Pass + NS, 3-Band EQ, Real-Time Voice FX + Reverb,
+ * Noise Gate, Compressor, Soft-Knee Limiter.
  */
 class AudioDspProcessor(private val sampleRateHz: Int = 48000) {
     private var gateEnvelope = 1f
@@ -119,8 +189,34 @@ class AudioDspProcessor(private val sampleRateHz: Int = 48000) {
     private var hpfPrevOutR = 0f
     private val hpfAlpha = 0.985f
 
+    private val lowShelf = StereoBiquad()
+    private val midPeak = StereoBiquad()
+    private val highShelf = StereoBiquad()
+    private val radioBoost = StereoBiquad().apply { setPeakingEq(180f, 0.9f, 5.5f, sampleRateHz) }
+    private val radioPresence = StereoBiquad().apply { setPeakingEq(3200f, 1.1f, 4.5f, sampleRateHz) }
+
+    private var cachedLowDb = Float.NaN
+    private var cachedMidDb = Float.NaN
+    private var cachedHighDb = Float.NaN
+
+    // Pitch / Reverb delay line (4096 stereo pairs)
+    private val fxRingSize = 4096
+    private val fxRingL = FloatArray(fxRingSize)
+    private val fxRingR = FloatArray(fxRingSize)
+    private var fxWriteIdx = 0
+    private var pitchPhase = 0f
+
     fun processStereoInPlace(buf: FloatArray, sampleCount: Int, cfg: AudioFilterConfig) {
         if (!cfg.anyActive() || sampleCount <= 0) return
+
+        if (cfg.eqEnabled && (cfg.eqLowDb != cachedLowDb || cfg.eqMidDb != cachedMidDb || cfg.eqHighDb != cachedHighDb)) {
+            cachedLowDb = cfg.eqLowDb
+            cachedMidDb = cfg.eqMidDb
+            cachedHighDb = cfg.eqHighDb
+            lowShelf.setLowShelf(120f, cfg.eqLowDb.coerceIn(-12f, 12f), sampleRateHz)
+            midPeak.setPeakingEq(1200f, 0.9f, cfg.eqMidDb.coerceIn(-12f, 12f), sampleRateHz)
+            highShelf.setHighShelf(6500f, cfg.eqHighDb.coerceIn(-12f, 12f), sampleRateHz)
+        }
 
         val gainLin = if (cfg.gainEnabled) dbToLinear(cfg.gainDb) else 1f
         val gateCloseLin = dbToLinear(cfg.gateCloseDb)
@@ -135,6 +231,7 @@ class AudioDspProcessor(private val sampleRateHz: Int = 48000) {
 
         var i = 0
         while (i < sampleCount) {
+            val isLeft = (i and 1) == 0
             var s = buf[i]
 
             if (cfg.gainEnabled) {
@@ -142,7 +239,7 @@ class AudioDspProcessor(private val sampleRateHz: Int = 48000) {
             }
 
             if (cfg.noiseSuppressionEnabled) {
-                if ((i and 1) == 0) {
+                if (isLeft) {
                     val out = hpfAlpha * (hpfPrevOutL + s - hpfPrevInL)
                     hpfPrevInL = s
                     hpfPrevOutL = out
@@ -152,6 +249,55 @@ class AudioDspProcessor(private val sampleRateHz: Int = 48000) {
                     hpfPrevInR = s
                     hpfPrevOutR = out
                     s = out
+                }
+            }
+
+            if (cfg.eqEnabled) {
+                s = lowShelf.process(s, isLeft)
+                s = midPeak.process(s, isLeft)
+                s = highShelf.process(s, isLeft)
+            }
+
+            when (cfg.voiceEffect) {
+                VoiceEffectPreset.NONE -> Unit
+                VoiceEffectPreset.BROADCAST_RADIO -> {
+                    s = radioBoost.process(s, isLeft)
+                    s = radioPresence.process(s, isLeft)
+                    s = tanh((s * 1.18f).toDouble()).toFloat()
+                }
+                VoiceEffectPreset.DEEP_BASS, VoiceEffectPreset.HIGH_PITCH -> {
+                    val ring = if (isLeft) fxRingL else fxRingR
+                    ring[fxWriteIdx] = s
+                    val grainLen = 1024f
+                    val rateDelta = if (cfg.voiceEffect == VoiceEffectPreset.DEEP_BASS) 0.22f else -0.24f
+                    if (isLeft) {
+                        pitchPhase = (pitchPhase + abs(rateDelta)) % 1f
+                    }
+                    val pA = pitchPhase
+                    val pB = (pitchPhase + 0.5f) % 1f
+                    val delayA = if (rateDelta > 0f) pA * grainLen else (1f - pA) * grainLen
+                    val delayB = if (rateDelta > 0f) pB * grainLen else (1f - pB) * grainLen
+                    val idxA = (fxWriteIdx - delayA.toInt() + fxRingSize) % fxRingSize
+                    val idxB = (fxWriteIdx - delayB.toInt() + fxRingSize) % fxRingSize
+                    val winA = sin(pA * PI).toFloat()
+                    val winB = sin(pB * PI).toFloat()
+                    s = (ring[idxA] * winA + ring[idxB] * winB) * 0.92f
+                    if (!isLeft) {
+                        fxWriteIdx = (fxWriteIdx + 1) % fxRingSize
+                    }
+                }
+                VoiceEffectPreset.STUDIO_REVERB -> {
+                    val ring = if (isLeft) fxRingL else fxRingR
+                    val tap1 = ring[(fxWriteIdx - 1150 + fxRingSize) % fxRingSize]
+                    val tap2 = ring[(fxWriteIdx - 2310 + fxRingSize) % fxRingSize]
+                    val tap3 = ring[(fxWriteIdx - 3490 + fxRingSize) % fxRingSize]
+                    val wet = (tap1 * 0.5f + tap2 * 0.35f + tap3 * 0.22f)
+                    ring[fxWriteIdx] = (s + wet * 0.42f).coerceIn(-1f, 1f)
+                    val mix = cfg.reverbMix.coerceIn(0.05f, 0.65f)
+                    s = s * (1f - mix * 0.35f) + wet * mix
+                    if (!isLeft) {
+                        fxWriteIdx = (fxWriteIdx + 1) % fxRingSize
+                    }
                 }
             }
 
@@ -227,7 +373,8 @@ class AudioDspProcessor(private val sampleRateHz: Int = 48000) {
  */
 class AudioCaptureMixer(
     private val context: Context,
-    private val onEncodedPcmChunk: (pcm16Stereo: ShortArray, sampleCount: Int, ptsUs: Long) -> Unit
+    private val onEncodedPcmChunk: (pcm16Stereo: ShortArray, sampleCount: Int, ptsUs: Long) -> Unit,
+    var onIsolatedAudioTracksPcm: ((micPcm: ShortArray, gamePcm: ShortArray, sampleCount: Int, ptsUs: Long) -> Unit)? = null
 ) {
 
     private class ActiveSfxPlayback(
@@ -241,6 +388,7 @@ class AudioCaptureMixer(
 
     private var micRecord: AudioRecord? = null
     private var playbackRecord: AudioRecord? = null
+    private var monitorTrack: AudioTrack? = null
     private var platformNoiseSuppressor: NoiseSuppressor? = null
     private var mixerThread: Thread? = null
 
@@ -430,6 +578,9 @@ class AudioCaptureMixer(
         val gameFloatBuf = FloatArray(frameSamples)
         val micFloatBuf = FloatArray(frameSamples)
         val mixedBuf = ShortArray(frameSamples)
+        val micTrackBuf = ShortArray(frameSamples)
+        val gameTrackBuf = ShortArray(frameSamples)
+        val monitorBuf = ShortArray(frameSamples)
 
         var consecutiveGameSilenceFrames = 0
         var duckGain = 1f
@@ -524,10 +675,17 @@ class AudioCaptureMixer(
             duckGain = AudioDspProcessor.computeDuckingGainStep(duckGain, micRmsLin, duckDb, duckEnabled)
 
             var gameRmsSum = 0.0
+            val gMonitorMode = gFilters.monitoringMode
+            val mMonitorMode = mFilters.monitoringMode
+            val gIncludeOut = gMonitorMode != AudioMonitoringMode.MONITOR_ONLY
+            val mIncludeOut = mMonitorMode != AudioMonitoringMode.MONITOR_ONLY
+            val monitorActive = gMonitorMode != AudioMonitoringMode.OFF || mMonitorMode != AudioMonitoringMode.OFF
+            val trackCb = onIsolatedAudioTracksPcm
+
             for (i in 0 until frameSamples) {
-                val gFloat = gameFloatBuf[i] * duckGain
-                gameRmsSum += (gFloat * gFloat)
-                val mFloat = micFloatBuf[i]
+                val gDucked = gameFloatBuf[i] * duckGain
+                gameRmsSum += (gDucked * gDucked)
+                val mProcessed = micFloatBuf[i]
                 var sfxFloat = 0f
                 if (activeSfxClips.isNotEmpty() && !masterMuted) {
                     for (clip in activeSfxClips) {
@@ -536,18 +694,36 @@ class AudioCaptureMixer(
                         }
                     }
                 }
-                val sum = gFloat + mFloat + sfxFloat
+                val gOut = if (gIncludeOut) gDucked else 0f
+                val mOut = if (mIncludeOut) mProcessed else 0f
+                val sum = gOut + mOut + sfxFloat
                 val limited = if (abs(sum) > 0.92f) {
                     tanh(sum.toDouble()).toFloat()
                 } else {
                     sum
                 }
                 mixedBuf[i] = (limited.coerceIn(-1f, 1f) * 32767f).toInt().toShort()
+
+                if (trackCb != null) {
+                    micTrackBuf[i] = (mProcessed.coerceIn(-1f, 1f) * 32767f).toInt().toShort()
+                    gameTrackBuf[i] = ((gDucked + sfxFloat).coerceIn(-1f, 1f) * 32767f).toInt().toShort()
+                }
+                if (monitorActive) {
+                    val monSum = (if (gMonitorMode != AudioMonitoringMode.OFF) gDucked else 0f) +
+                        (if (mMonitorMode != AudioMonitoringMode.OFF) mProcessed else 0f)
+                    monitorBuf[i] = (monSum.coerceIn(-1f, 1f) * 32767f).toInt().toShort()
+                }
             }
             if (activeSfxClips.isNotEmpty()) {
                 activeSfxClips.removeAll { it.cursor >= it.samples.size }
             }
             lastAudioDspMicros = (System.nanoTime() - dspStartNs) / 1000L
+
+            if (monitorActive) {
+                ensureAndWriteMonitorTrack(monitorBuf, frameSamples)
+            } else if (monitorTrack != null) {
+                releaseMonitorTrack()
+            }
 
             val nowMs = SystemClock.elapsedRealtime()
             val gDb = toDb(sqrt(gameRmsSum / frameSamples).toFloat())
@@ -576,6 +752,7 @@ class AudioCaptureMixer(
             }
 
             onEncodedPcmChunk(mixedBuf, frameSamples, ptsUs)
+            trackCb?.invoke(micTrackBuf, gameTrackBuf, frameSamples, ptsUs)
         }
     }
 
@@ -587,7 +764,7 @@ class AudioCaptureMixer(
         var codec: MediaCodec? = null
         return runCatching {
             if (pathOrUri.startsWith("content://")) {
-                extractor.setDataSource(context, Uri.parse(pathOrUri), null)
+                extractor.setDataSource(context, pathOrUri.toUri(), null)
             } else {
                 val f = File(pathOrUri)
                 if (!f.exists()) return null
@@ -774,6 +951,7 @@ class AudioCaptureMixer(
         runCatching { audioManager.unregisterAudioDeviceCallback(deviceCallback) }
         runCatching { mixerThread?.join(500) }
         mixerThread = null
+        releaseMonitorTrack()
         runCatching { platformNoiseSuppressor?.release() }
         platformNoiseSuppressor = null
         runCatching { playbackRecord?.stop(); playbackRecord?.release() }
@@ -789,6 +967,47 @@ class AudioCaptureMixer(
         gamePeakHoldDb = -60f
         micPeakHoldDb = -60f
         lastAudioDspMicros = 0L
+    }
+
+    private fun ensureAndWriteMonitorTrack(pcm: ShortArray, sampleCount: Int) {
+        var track = monitorTrack
+        if (track == null) {
+            val minBuf = AudioTrack.getMinBufferSize(
+                48000,
+                AudioFormat.CHANNEL_OUT_STEREO,
+                AudioFormat.ENCODING_PCM_16BIT
+            ).coerceAtLeast(4096)
+            track = runCatching {
+                AudioTrack.Builder()
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(48000)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(minBuf * 2)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build().also { it.play() }
+            }.getOrNull()
+            monitorTrack = track
+        }
+        track?.write(pcm, 0, sampleCount, AudioTrack.WRITE_NON_BLOCKING)
+    }
+
+    private fun releaseMonitorTrack() {
+        runCatching {
+            monitorTrack?.pause()
+            monitorTrack?.flush()
+            monitorTrack?.release()
+        }
+        monitorTrack = null
     }
 
     private fun refreshRoutes() {

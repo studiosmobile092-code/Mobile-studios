@@ -68,11 +68,13 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.BuildConfig
+import com.example.mobilelabs.model.AlertEventType
 import com.example.mobilelabs.model.MobileLabsUiState
 import com.example.mobilelabs.model.PlatformConnectionState
 import com.example.mobilelabs.model.SessionPhase
 import com.example.mobilelabs.model.SourceType
 import com.example.mobilelabs.model.StreamingPlatform
+import com.example.mobilelabs.model.TwitchDeviceAuthState
 import com.example.ui.theme.ApertureRed
 import com.example.ui.theme.ApertureRedHi
 import com.example.ui.theme.ObsBorder
@@ -111,6 +113,9 @@ fun ConnectionsAndMultiStreamDialog(
     ) -> Unit,
     onSearchTwitchCategories: (String) -> Unit,
     onSaveCustomClientId: (StreamingPlatform, String) -> Unit,
+    onStartTwitchDeviceAuth: () -> Unit,
+    onCancelTwitchDeviceAuth: () -> Unit,
+    onOpenExternalUrl: (String) -> Unit,
     onOpenCustomRtmpSettings: () -> Unit
 ) {
     var showClientIdConfig by remember { mutableStateOf(false) }
@@ -171,7 +176,11 @@ fun ConnectionsAndMultiStreamDialog(
                             conn = state.youtubeConnection,
                             accent = YouTubeRed,
                             twitchCategories = emptyList(),
+                            twitchDeviceAuth = null,
                             onConnect = { onStartOAuth(StreamingPlatform.YOUTUBE) },
+                            onStartDeviceAuth = {},
+                            onCancelDeviceAuth = {},
+                            onOpenExternalUrl = onOpenExternalUrl,
                             onDisconnect = { onDisconnect(StreamingPlatform.YOUTUBE) },
                             onToggleMulti = { onToggleMultiStream(StreamingPlatform.YOUTUBE, it) },
                             onSearchCategories = {},
@@ -184,7 +193,11 @@ fun ConnectionsAndMultiStreamDialog(
                             conn = state.twitchConnection,
                             accent = TwitchPurple,
                             twitchCategories = state.twitchCategories,
+                            twitchDeviceAuth = state.twitchDeviceAuth,
                             onConnect = { onStartOAuth(StreamingPlatform.TWITCH) },
+                            onStartDeviceAuth = onStartTwitchDeviceAuth,
+                            onCancelDeviceAuth = onCancelTwitchDeviceAuth,
+                            onOpenExternalUrl = onOpenExternalUrl,
                             onDisconnect = { onDisconnect(StreamingPlatform.TWITCH) },
                             onToggleMulti = { onToggleMultiStream(StreamingPlatform.TWITCH, it) },
                             onSearchCategories = onSearchTwitchCategories,
@@ -296,7 +309,11 @@ private fun PlatformDestinationCard(
     conn: PlatformConnectionState,
     accent: Color,
     twitchCategories: List<com.example.mobilelabs.model.TwitchCategoryItem>,
+    twitchDeviceAuth: TwitchDeviceAuthState?,
     onConnect: () -> Unit,
+    onStartDeviceAuth: () -> Unit,
+    onCancelDeviceAuth: () -> Unit,
+    onOpenExternalUrl: (String) -> Unit,
     onDisconnect: () -> Unit,
     onToggleMulti: (Boolean) -> Unit,
     onSearchCategories: (String) -> Unit,
@@ -356,7 +373,7 @@ private fun PlatformDestinationCard(
                 )
                 Button(
                     onClick = onConnect,
-                    enabled = !conn.authInProgress,
+                    enabled = !conn.authInProgress && twitchDeviceAuth?.active != true,
                     colors = ButtonDefaults.buttonColors(containerColor = accent),
                     modifier = Modifier
                         .fillMaxWidth()
@@ -370,6 +387,57 @@ private fun PlatformDestinationCard(
                         color = Color.White,
                         fontWeight = FontWeight.SemiBold
                     )
+                }
+                if (conn.platform == StreamingPlatform.TWITCH) {
+                    if (twitchDeviceAuth?.active == true) {
+                        Surface(
+                            color = ObsWellBg,
+                            shape = RoundedCornerShape(6.dp),
+                            border = BorderStroke(1.dp, accent),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text("Enter this code on twitch.tv/activate:", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
+                                Text(
+                                    text = twitchDeviceAuth.userCode,
+                                    style = MaterialTheme.typography.titleLarge,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.testTag("twitch_device_user_code")
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Button(
+                                        onClick = { onOpenExternalUrl(twitchDeviceAuth.verificationUri) },
+                                        colors = ButtonDefaults.buttonColors(containerColor = accent),
+                                        modifier = Modifier.height(36.dp)
+                                    ) { Text("Open Activate Page", fontSize = 11.sp, color = Color.White) }
+                                    OutlinedButton(
+                                        onClick = onCancelDeviceAuth,
+                                        modifier = Modifier.height(36.dp)
+                                    ) { Text("Cancel", fontSize = 11.sp, color = StudioText) }
+                                }
+                            }
+                        }
+                    } else {
+                        OutlinedButton(
+                            onClick = onStartDeviceAuth,
+                            enabled = !conn.authInProgress,
+                            border = BorderStroke(1.dp, accent.copy(alpha = 0.7f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(40.dp)
+                                .testTag("twitch_device_auth_btn")
+                        ) {
+                            Text("Quick TV / Device Code Sign-In", fontSize = 12.sp, color = StudioText)
+                        }
+                    }
+                    if (!twitchDeviceAuth?.error.isNullOrBlank()) {
+                        Text(twitchDeviceAuth?.error.orEmpty(), style = MaterialTheme.typography.labelSmall, color = ApertureRedHi)
+                    }
                 }
             } else {
                 Row(
@@ -667,12 +735,15 @@ fun ProToolsDialog(
     onClearDrawingStrokes: () -> Unit,
     onControlTimer: (String, String) -> Unit,
     onAdjustScoreboard: (String, Boolean, Int) -> Unit,
-    onResetScoreboard: (String) -> Unit
+    onResetScoreboard: (String) -> Unit,
+    onTriggerTestAlert: (AlertEventType) -> Unit,
+    onAdjustGoalProgress: (String, Int) -> Unit
 ) {
     val editableSceneId = if (state.studioModeEnabled) state.previewSceneId else state.sceneCollection.activeSceneId
     val editableScene = state.sceneCollection.scenes.firstOrNull { it.id == editableSceneId }
     val timerSources = editableScene?.sources?.filter { it.type == SourceType.TIMER_SOURCE }.orEmpty()
     val scoreSources = editableScene?.sources?.filter { it.type == SourceType.SCOREBOARD_SOURCE }.orEmpty()
+    val goalSources = editableScene?.sources?.filter { it.type == SourceType.GOAL_BAR }.orEmpty()
 
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(
@@ -948,6 +1019,58 @@ fun ProToolsDialog(
                                         OutlinedButton(onClick = { onAdjustScoreboard(sSrc.id, false, 1) }) { Text("${sSrc.scoreAwayName} +1", color = StudioText) }
                                         TextButton(onClick = { onResetScoreboard(sSrc.id) }) { Text("Reset", color = StudioTextDim) }
                                     }
+                                }
+                            }
+                        }
+                    }
+
+                    // 5. Stream Alert Box Triggers & Goal Bar Progress
+                    Surface(
+                        color = SurfaceLevel1,
+                        shape = RoundedCornerShape(6.dp),
+                        border = BorderStroke(1.dp, ObsBorder),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Stream Alert Box & Goal Bar Studio", style = MaterialTheme.typography.titleSmall, color = StudioText)
+                                state.activeAlertEvent?.let { activeEv ->
+                                    Text(
+                                        text = "ACTIVE: ${activeEv.type.label}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = StatusOk,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                            Text("Test Live Broadcast Alert Overlays (auto-increments Goal Bar on Follow/Sub):", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
+                            Row(
+                                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                AlertEventType.entries.forEach { evType ->
+                                    Button(
+                                        onClick = { onTriggerTestAlert(evType) },
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(evType.accentArgb.toInt()).copy(alpha = 0.85f)),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                        modifier = Modifier.height(36.dp).testTag("test_alert_${evType.name.lowercase()}")
+                                    ) { Text(evType.label, fontSize = 11.sp, color = Color.White) }
+                                }
+                            }
+                            goalSources.forEach { gSrc ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("${gSrc.goalTitle}: ${gSrc.goalCurrent} / ${gSrc.goalTarget}", color = StudioText, modifier = Modifier.weight(1f))
+                                    OutlinedButton(onClick = { onAdjustGoalProgress(gSrc.id, -1) }) { Text("-1", color = StudioText) }
+                                    OutlinedButton(onClick = { onAdjustGoalProgress(gSrc.id, 1) }) { Text("+1", color = StatusOk) }
+                                    OutlinedButton(onClick = { onAdjustGoalProgress(gSrc.id, 5) }) { Text("+5", color = StatusOk) }
                                 }
                             }
                         }

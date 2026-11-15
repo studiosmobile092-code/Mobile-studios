@@ -90,7 +90,9 @@ data class SettingsDialogCallbacks(
     val onImportObsJson: () -> Unit,
     val onRequestEnableOverlay: (Boolean) -> Unit,
     val onOpenAboutLicenses: () -> Unit,
-    val onAudioSyncOffset: (String, Int) -> Unit
+    val onAudioSyncOffset: (String, Int) -> Unit,
+    val onSetMultiTrackAudioEnabled: (Boolean) -> Unit,
+    val onSetSkipGoLivePreFlight: (Boolean) -> Unit
 )
 
 @Composable
@@ -300,6 +302,27 @@ fun SettingsDialog(
                                 if (state.customRecordingFolderUri != null) {
                                     TextButton(onClick = callbacks.onResetRecordingFolder) { Text("Reset Default", color = StudioTextDim) }
                                 }
+                            }
+                            HorizontalDivider(color = ObsBorder)
+                            Row(
+                                modifier = Modifier.fillMaxWidth().background(ObsWellBg, RoundedCornerShape(4.dp)).padding(10.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("Multi-Track MP4 Recording (3 Audio Buses)", style = MaterialTheme.typography.bodyMedium, color = StudioText)
+                                    Text(
+                                        "Records Track 1 (Master Mix) + Track 2 (Isolated Mic) + Track 3 (Isolated Game Audio) for DaVinci Resolve / Premiere Pro.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = StudioTextDim
+                                    )
+                                }
+                                Switch(
+                                    checked = state.videoConfig.multiTrackAudioEnabled,
+                                    onCheckedChange = callbacks.onSetMultiTrackAudioEnabled,
+                                    enabled = state.recordingPhase == com.example.mobilelabs.model.RecordingPhase.IDLE,
+                                    modifier = Modifier.testTag("multitrack_audio_switch")
+                                )
                             }
                         }
                         2 -> {
@@ -527,6 +550,19 @@ fun SettingsDialog(
                                 )
                             }
 
+                            Row(
+                                modifier = Modifier.fillMaxWidth().background(ObsWellBg, RoundedCornerShape(4.dp)).padding(10.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Skip Go-Live Pre-Flight Checklist (Start Immediately)", style = MaterialTheme.typography.bodySmall, color = StudioText)
+                                Switch(
+                                    checked = state.videoConfig.skipGoLivePreFlight,
+                                    onCheckedChange = callbacks.onSetSkipGoLivePreFlight,
+                                    modifier = Modifier.testTag("skip_preflight_switch")
+                                )
+                            }
+
                             OutlinedButton(onClick = callbacks.onOpenAboutLicenses) {
                                 Text("About Mobile Labs · SBOM & GPL-2.0 Source Offer", color = StudioText)
                             }
@@ -680,6 +716,125 @@ fun DiagnosticsAndProbesDialog(
                                 Text(line, style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun GoLivePreFlightDialog(
+    state: MobileLabsUiState,
+    onDismiss: () -> Unit,
+    onConfirmGoLive: () -> Unit,
+    onSetSkipPreFlight: (Boolean) -> Unit,
+    onOpenConnections: () -> Unit,
+    onOpenSettings: () -> Unit
+) {
+    val cfg = state.videoConfig
+    val ytReady = state.youtubeConnection.connected && state.youtubeConnection.enabledForMultiStream
+    val twReady = state.twitchConnection.connected && state.twitchConnection.enabledForMultiStream
+    val primaryRtmpReady = state.hasStreamKeySaved && state.rtmpServerUrl.isNotBlank()
+    val dualRtmpReady = state.dualDestination.enabled && state.dualDestination.hasKeySaved && state.dualDestination.serverUrl.isNotBlank()
+    val hasAnyDestination = ytReady || twReady || primaryRtmpReady || dualRtmpReady
+
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(
+            color = ObsWindowBg,
+            shape = RoundedCornerShape(6.dp),
+            border = BorderStroke(1.dp, ObsBorder),
+            modifier = Modifier.fillMaxWidth(0.76f)
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text("Go-Live Pre-Flight Checklist", style = MaterialTheme.typography.titleMedium, color = StudioText, fontWeight = FontWeight.Bold)
+                        Text("Verify destinations, encoder headroom, and audio before going live.", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
+                    }
+                    TextButton(onClick = onDismiss) { Text("Cancel", color = StudioTextDim) }
+                }
+
+                HorizontalDivider(color = ObsBorder)
+
+                Surface(color = ObsWellBg, shape = RoundedCornerShape(4.dp), border = BorderStroke(1.dp, ObsBorder), modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("1. Stream Destinations", style = MaterialTheme.typography.titleSmall, color = StudioText)
+                        if (ytReady) Text("✓ YouTube Live: ${state.youtubeConnection.streamTitle} (${state.youtubeConnection.privacyStatus})", style = MaterialTheme.typography.bodySmall, color = StatusOk)
+                        if (twReady) Text("✓ Twitch: ${state.twitchConnection.streamTitle} (${state.twitchConnection.categoryName})", style = MaterialTheme.typography.bodySmall, color = StatusOk)
+                        if (primaryRtmpReady) Text("✓ Primary RTMP: ${state.rtmpServerUrl}", style = MaterialTheme.typography.bodySmall, color = StatusOk)
+                        if (dualRtmpReady) Text("✓ Dual RTMP: ${state.dualDestination.serverUrl}", style = MaterialTheme.typography.bodySmall, color = StatusOk)
+                        if (!hasAnyDestination) {
+                            Text(
+                                "No stream destination configured yet. Connect YouTube / Twitch or configure Custom RTMP first.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = StatusWarn
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedButton(onClick = { onDismiss(); onOpenConnections() }) { Text("Connect YT / Twitch", color = StudioText) }
+                                OutlinedButton(onClick = { onDismiss(); onOpenSettings() }) { Text("RTMP Settings", color = StudioText) }
+                            }
+                        }
+                    }
+                }
+
+                Surface(color = ObsWellBg, shape = RoundedCornerShape(4.dp), border = BorderStroke(1.dp, ObsBorder), modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("2. Video, Bitrate ABR & Thermal", style = MaterialTheme.typography.titleSmall, color = StudioText)
+                        Text(
+                            "Output: ${cfg.outputWidth}x${cfg.outputHeight} @${cfg.fps} fps · ${cfg.videoBitrateKbps} kbps · ABR: ${if (cfg.dynamicBitrateEnabled) "ON" else "OFF"}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = StudioTextDim
+                        )
+                        Text(
+                            "Thermal: ${state.telemetry.thermal.statusLabel} · Multi-Track Audio: ${if (cfg.multiTrackAudioEnabled) "3-Bus MP4 ON" else "Standard Stereo"}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (state.telemetry.thermal.shouldWarnBanner) StatusWarn else StatusOk
+                        )
+                    }
+                }
+
+                Surface(color = ObsWellBg, shape = RoundedCornerShape(4.dp), border = BorderStroke(1.dp, ObsBorder), modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("3. Audio Mixer Check", style = MaterialTheme.typography.titleSmall, color = StudioText)
+                        if (state.masterMuted) {
+                            Text("⚠ MASTER AUDIO IS MUTED! Viewers will hear silence.", style = MaterialTheme.typography.bodySmall, color = ApertureRedHi, fontWeight = FontWeight.Bold)
+                        } else {
+                            state.audioChannels.forEach { ch ->
+                                val status = if (ch.muted) "MUTED" else "${(ch.volume * 100).toInt()}% (${ch.filters.activeSummary()})"
+                                Text("• ${ch.label}: $status", style = MaterialTheme.typography.bodySmall, color = if (ch.muted) StatusWarn else StudioTextDim)
+                            }
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Switch(
+                            checked = cfg.skipGoLivePreFlight,
+                            onCheckedChange = onSetSkipPreFlight
+                        )
+                        Text("Don't show pre-flight check again", style = MaterialTheme.typography.bodySmall, color = StudioTextDim)
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = onDismiss) { Text("Back", color = StudioText) }
+                        Button(
+                            onClick = onConfirmGoLive,
+                            enabled = hasAnyDestination,
+                            colors = ButtonDefaults.buttonColors(containerColor = ApertureRed),
+                            modifier = Modifier.height(48.dp).testTag("confirm_go_live_preflight_btn")
+                        ) { Text("Start Streaming Now", color = StudioText, fontWeight = FontWeight.Bold) }
                     }
                 }
             }

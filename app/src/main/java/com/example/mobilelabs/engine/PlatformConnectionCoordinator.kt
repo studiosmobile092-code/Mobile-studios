@@ -7,6 +7,7 @@ import com.example.mobilelabs.model.PlatformChatMessage
 import com.example.mobilelabs.model.PlatformConnectionState
 import com.example.mobilelabs.model.SessionPhase
 import com.example.mobilelabs.model.StreamingPlatform
+import com.example.mobilelabs.model.TwitchDeviceAuthState
 import com.example.mobilelabs.platform.OAuthPkceManager
 import com.example.mobilelabs.platform.TwitchIrcChatClient
 import com.example.mobilelabs.platform.TwitchLiveService
@@ -39,6 +40,7 @@ class PlatformConnectionCoordinator(
     private val twitchIrc = TwitchIrcChatClient()
 
     private var youtubeChatJob: Job? = null
+    private var twitchDevicePollJob: Job? = null
     private val seenChatIds = LinkedHashSet<String>(256)
 
     fun hydrateSavedConnections() {
@@ -90,6 +92,95 @@ class PlatformConnectionCoordinator(
                 logEvent("OAuth launch failed (${platform.label}): $msg")
             }
         }
+    }
+
+    fun startTwitchDeviceAuth() {
+        twitchDevicePollJob?.cancel()
+        scope.launch {
+            val clientId = secretStore.resolveClientId(StreamingPlatform.TWITCH)
+            uiState.update {
+                it.copy(
+                    twitchDeviceAuth = TwitchDeviceAuthState(active = true, polling = false, error = null),
+                    twitchConnection = it.twitchConnection.copy(authInProgress = true, errorReason = null)
+                )
+            }
+            val startRes = oauthManager.requestTwitchDeviceCode(clientId)
+            startRes.onFailure { err ->
+                val msg = err.message ?: "Failed to start Twitch Device Login"
+                uiState.update {
+                    it.copy(
+                        twitchDeviceAuth = TwitchDeviceAuthState(active = false, error = msg),
+                        twitchConnection = it.twitchConnection.copy(authInProgress = false, errorReason = msg),
+                        statusMessage = msg
+                    )
+                }
+                logEvent("Twitch Device Auth error: $msg")
+            }.onSuccess { dev ->
+                val expiresAt = System.currentTimeMillis() + dev.expiresInSec * 1000L
+                uiState.update {
+                    it.copy(
+                        twitchDeviceAuth = TwitchDeviceAuthState(
+                            active = true,
+                            userCode = dev.userCode,
+                            deviceCode = dev.deviceCode,
+                            verificationUri = dev.verificationUri,
+                            expiresAtMs = expiresAt,
+                            polling = true,
+                            error = null
+                        ),
+                        statusMessage = "Enter Twitch code ${dev.userCode} at twitch.tv/activate"
+                    )
+                }
+                logEvent("Twitch Device Code issued: ${dev.userCode}")
+
+                twitchDevicePollJob = scope.launch(Dispatchers.IO) {
+                    var stepMs = (dev.intervalSec * 1000L).coerceAtLeast(3000L)
+                    while (isActive && System.currentTimeMillis() < expiresAt) {
+                        delay(stepMs)
+                        when (val outcome = oauthManager.pollTwitchDeviceToken(clientId, dev.deviceCode)) {
+                            is OAuthPkceManager.TwitchDevicePollOutcome.Pending -> Unit
+                            is OAuthPkceManager.TwitchDevicePollOutcome.SlowDown -> stepMs = (stepMs + 2500L).coerceAtMost(15_000L)
+                            is OAuthPkceManager.TwitchDevicePollOutcome.Authorized -> {
+                                uiState.update { it.copy(twitchDeviceAuth = TwitchDeviceAuthState()) }
+                                completeTwitchConnection(outcome.tokens, clientId)
+                                return@launch
+                            }
+                            is OAuthPkceManager.TwitchDevicePollOutcome.Failed -> {
+                                uiState.update {
+                                    it.copy(
+                                        twitchDeviceAuth = TwitchDeviceAuthState(active = false, error = outcome.reason),
+                                        twitchConnection = it.twitchConnection.copy(authInProgress = false, errorReason = outcome.reason),
+                                        statusMessage = outcome.reason
+                                    )
+                                }
+                                return@launch
+                            }
+                        }
+                    }
+                    uiState.update {
+                        it.copy(
+                            twitchDeviceAuth = TwitchDeviceAuthState(active = false, error = "Device code expired"),
+                            twitchConnection = it.twitchConnection.copy(authInProgress = false)
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun cancelTwitchDeviceAuth() {
+        twitchDevicePollJob?.cancel()
+        twitchDevicePollJob = null
+        uiState.update {
+            it.copy(
+                twitchDeviceAuth = TwitchDeviceAuthState(),
+                twitchConnection = it.twitchConnection.copy(authInProgress = false)
+            )
+        }
+    }
+
+    fun openExternalUrl(url: String) {
+        oauthManager.openCustomTabUrl(url)
     }
 
     fun handleOAuthRedirect(uri: Uri) {

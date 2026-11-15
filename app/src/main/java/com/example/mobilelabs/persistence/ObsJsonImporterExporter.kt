@@ -244,6 +244,15 @@ object ObsJsonImporterExporter {
                     put("opacity", src.chatOverlayOpacity.toDouble())
                     put("max_messages", src.chatOverlayMaxMessages)
                 }
+                SourceType.ALERT_BOX -> {
+                    put("show_chime", src.alertShowChime)
+                }
+                SourceType.GOAL_BAR -> {
+                    put("goal_title", src.goalTitle)
+                    put("goal_current", src.goalCurrent)
+                    put("goal_target", src.goalTarget)
+                    put("goal_accent", src.goalAccentColorArgb)
+                }
                 SourceType.TEXT_SOURCE -> {
                     put("text", src.textContent)
                     put("color1", src.textColorArgb)
@@ -271,6 +280,11 @@ object ObsJsonImporterExporter {
                     put("border_width", src.borderWidthPx.toDouble())
                     put("border_color", src.borderColorArgb)
                     put("mirror_horizontal", src.mirrorHorizontal)
+                    put("cam_ev", src.camExposureEv)
+                    put("cam_iso", src.camIso)
+                    put("cam_focus", src.camFocusDistance.toDouble())
+                    put("cam_wb", src.camWhiteBalance.name)
+                    put("cam_zoom", src.camZoomRatio.toDouble())
                 }
                 else -> Unit
             }
@@ -330,6 +344,14 @@ object ObsJsonImporterExporter {
                 put("name", "Sharpen")
                 put("enabled", true)
                 put("settings", JSONObject().put("sharpness", f.sharpenAmount.toDouble()))
+            })
+        }
+        if (f.beautyEnabled) {
+            arr.put(JSONObject().apply {
+                put("id", "mobilelabs_beauty")
+                put("name", "Beauty Smooth")
+                put("enabled", true)
+                put("settings", JSONObject().put("strength", f.beautyStrength.toDouble()))
             })
         }
         if (f.lutEnabled && f.lutPreset != LutPreset.NONE) {
@@ -412,6 +434,15 @@ object ObsJsonImporterExporter {
             borderWidthPx = settings.optDouble("border_width", 0.0).toFloat().coerceIn(0f, 24f),
             borderColorArgb = settings.optLong("border_color", 0xFFCC1B1BL),
             mirrorHorizontal = settings.optBoolean("mirror_horizontal", false),
+            camExposureEv = settings.optInt("cam_ev", 0),
+            camIso = settings.optInt("cam_iso", 0),
+            camFocusDistance = settings.optDouble("cam_focus", -1.0).toFloat(),
+            camWhiteBalance = runCatching {
+                com.example.mobilelabs.model.CameraWhiteBalanceMode.valueOf(
+                    settings.optString("cam_wb", com.example.mobilelabs.model.CameraWhiteBalanceMode.AUTO.name)
+                )
+            }.getOrDefault(com.example.mobilelabs.model.CameraWhiteBalanceMode.AUTO),
+            camZoomRatio = settings.optDouble("cam_zoom", 1.0).toFloat().coerceIn(1f, 4f),
             mediaPathOrUri = rawPath,
             mediaLoop = settings.optBoolean("looping", true),
             mediaMuted = settings.optBoolean("muted", false),
@@ -431,6 +462,11 @@ object ObsJsonImporterExporter {
             scoreAwayName = settings.optString("away_name", "P2").take(24),
             scoreHome = settings.optInt("home_score", 0),
             scoreAway = settings.optInt("away_score", 0),
+            goalTitle = settings.optString("goal_title", "FOLLOWER GOAL").take(40),
+            goalCurrent = settings.optInt("goal_current", 42),
+            goalTarget = settings.optInt("goal_target", 100).coerceAtLeast(1),
+            goalAccentColorArgb = settings.optLong("goal_accent", 0xFF9146FFL),
+            alertShowChime = settings.optBoolean("show_chime", true),
             drawingBrushColorArgb = settings.optLong("brush_color", 0xFFFF3B30L),
             drawingBrushSizePx = settings.optDouble("brush_size", 10.0).toFloat().coerceIn(2f, 40f),
             chatOverlayOpacity = settings.optDouble("opacity", 0.72).toFloat().coerceIn(0.1f, 1f),
@@ -474,6 +510,10 @@ object ObsJsonImporterExporter {
                     sharpenEnabled = true,
                     sharpenAmount = s.optDouble("sharpness", 0.35).toFloat().coerceIn(0f, 1.0f)
                 )
+                "mobilelabs_beauty" -> cfg = cfg.copy(
+                    beautyEnabled = true,
+                    beautyStrength = s.optDouble("strength", 0.45).toFloat().coerceIn(0f, 1.0f)
+                )
                 "clut_filter" -> cfg = cfg.copy(
                     lutEnabled = true,
                     lutPreset = runCatching {
@@ -506,6 +546,8 @@ object ObsJsonImporterExporter {
         SourceType.MEDIA_SOURCE -> "ffmpeg_source"
         SourceType.BROWSER_SOURCE -> "browser_source"
         SourceType.CHAT_OVERLAY -> "mobilelabs_chat_overlay"
+        SourceType.ALERT_BOX -> "mobilelabs_alert_box"
+        SourceType.GOAL_BAR -> "mobilelabs_goal_bar"
         SourceType.TEXT_SOURCE -> "text_ft2_source_v2"
         SourceType.TIMER_SOURCE -> "mobilelabs_timer"
         SourceType.SCOREBOARD_SOURCE -> "mobilelabs_scoreboard"
@@ -527,6 +569,8 @@ object ObsJsonImporterExporter {
         obsId in setOf("ffmpeg_source", "vlc_source") -> SourceType.MEDIA_SOURCE
         obsId == "browser_source" -> SourceType.BROWSER_SOURCE
         obsId == "mobilelabs_chat_overlay" -> SourceType.CHAT_OVERLAY
+        obsId == "mobilelabs_alert_box" -> SourceType.ALERT_BOX
+        obsId == "mobilelabs_goal_bar" -> SourceType.GOAL_BAR
         obsId == "mobilelabs_timer" -> SourceType.TIMER_SOURCE
         obsId == "mobilelabs_scoreboard" -> SourceType.SCOREBOARD_SOURCE
         obsId == "mobilelabs_drawing" -> SourceType.DRAWING_LAYER

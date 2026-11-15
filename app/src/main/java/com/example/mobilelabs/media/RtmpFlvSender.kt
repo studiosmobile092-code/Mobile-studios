@@ -269,6 +269,7 @@ class RtmpFlvSender(
     private val videoSeqSent = AtomicBoolean(false)
     private val audioSeqSent = AtomicBoolean(false)
     private val needsKeyframeAfterDrop = AtomicBoolean(false)
+    private val lastWriteDurationMs = AtomicLong(0L)
 
     @Volatile private var pendingVideoSeq: ByteArray? = null
     @Volatile private var pendingAudioSeq: ByteArray? = null
@@ -309,6 +310,11 @@ class RtmpFlvSender(
 
     fun queueDepth(): Int = queue.size
     fun bufferedBytes(): Long = queuedBytes.get()
+    fun congestionPressure(): Float {
+        val qFrac = (queue.size / 150f).coerceIn(0f, 1f)
+        val writeSlowFrac = (lastWriteDurationMs.get() / 220f).coerceIn(0f, 1f)
+        return maxOf(qFrac, writeSlowFrac)
+    }
 
     fun stop() {
         running.set(false)
@@ -514,6 +520,7 @@ class RtmpFlvSender(
                     firstMediaPtsMs = pkt.timestampMs
                 }
                 val relTs = (pkt.timestampMs - firstMediaPtsMs).coerceAtLeast(0L)
+                val writeStartMs = android.os.SystemClock.elapsedRealtime()
                 synchronized(writeLock) {
                     if (pkt.isVideo) {
                         writeFlvVideoTag(output, pkt.payload, relTs, isKey = pkt.isKey, isSeqHeader = false)
@@ -524,6 +531,7 @@ class RtmpFlvSender(
                         output.flush()
                     }
                 }
+                lastWriteDurationMs.set((android.os.SystemClock.elapsedRealtime() - writeStartMs).coerceAtLeast(0L))
             }
         } catch (t: Throwable) {
             if (running.get()) {

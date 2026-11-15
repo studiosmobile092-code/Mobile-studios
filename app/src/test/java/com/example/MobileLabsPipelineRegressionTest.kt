@@ -9,6 +9,7 @@ import com.example.mobilelabs.media.FlvH264Helper
 import com.example.mobilelabs.media.RecordingPtsRebaser
 import com.example.mobilelabs.media.ReplayGopRingBuffer
 import com.example.mobilelabs.media.RtmpProtocolParser
+import com.example.mobilelabs.model.AudioFilterConfig
 import com.example.mobilelabs.model.FacecamShape
 import com.example.mobilelabs.model.RecordingFormat
 import com.example.mobilelabs.model.SceneCollection
@@ -16,6 +17,7 @@ import com.example.mobilelabs.model.SceneModel
 import com.example.mobilelabs.model.SourceType
 import com.example.mobilelabs.model.StreamingPlatform
 import com.example.mobilelabs.model.VideoConfig
+import com.example.mobilelabs.model.VoiceEffectPreset
 import com.example.mobilelabs.persistence.ObsJsonImporterExporter
 import com.example.mobilelabs.persistence.SceneCollectionRepository
 import com.example.mobilelabs.platform.OAuthPkceManager
@@ -196,6 +198,26 @@ class MobileLabsPipelineRegressionTest {
     }
 
     @Test
+    fun `AudioDspProcessor executes 3-band EQ and all VoiceEffectPresets cleanly without NaN`() {
+        val dsp = AudioDspProcessor(48000)
+        VoiceEffectPreset.entries.forEach { preset ->
+            val buf = FloatArray(1920) { i ->
+                kotlin.math.sin(2.0 * kotlin.math.PI * 220.0 * (i / 2) / 48000.0).toFloat() * 0.4f
+            }
+            val cfg = AudioFilterConfig(
+                eqEnabled = true,
+                eqLowDb = 4f,
+                eqMidDb = -2f,
+                eqHighDb = 3f,
+                voiceEffect = preset,
+                reverbMix = 0.3f
+            )
+            dsp.processStereoInPlace(buf, buf.size, cfg)
+            assertTrue("Preset $preset produced NaN/Inf", buf.all { it.isFinite() })
+        }
+    }
+
+    @Test
     fun `OAuthPkceManager computes RFC 7636 S256 challenge and builds YouTube and Twitch auth URIs`() {
         // RFC 7636 Appendix B test vector
         val verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
@@ -226,14 +248,14 @@ class MobileLabsPipelineRegressionTest {
     }
 
     @Test
-    fun `SceneEditingHelper creates valid default sources for all 16 SourceTypes and OBS JSON round-trips`() {
+    fun `SceneEditingHelper creates valid default sources for all 18 SourceTypes and OBS JSON round-trips`() {
         val ctx = ApplicationProvider.getApplicationContext<Context>()
         val allSources = SourceType.entries.map { type ->
             val created = SceneEditingHelper.createDefaultSource(type)
             if (type == SourceType.CAMERA_2) created.copy(facecamShape = FacecamShape.CIRCLE, borderWidthPx = 4f)
             else created
         }
-        assertEquals(16, allSources.size)
+        assertEquals(18, allSources.size)
 
         val collection = SceneCollection(
             id = "col_all",
@@ -248,6 +270,8 @@ class MobileLabsPipelineRegressionTest {
             SourceType.SCREEN_CAPTURE,
             SourceType.CAMERA_2,
             SourceType.BROWSER_SOURCE,
+            SourceType.ALERT_BOX,
+            SourceType.GOAL_BAR,
             SourceType.TIMER_SOURCE,
             SourceType.SCOREBOARD_SOURCE,
             SourceType.CHAT_OVERLAY,

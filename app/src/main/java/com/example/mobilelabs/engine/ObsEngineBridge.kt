@@ -114,6 +114,8 @@ class ObsEngineBridge(private val context: Context) {
             "CAMERA_2" -> "android_camera2"
             "BROWSER_SOURCE" -> "browser_source"
             "CHAT_OVERLAY" -> "chat_overlay_source"
+            "ALERT_BOX" -> "alert_box_source"
+            "GOAL_BAR" -> "goal_bar_source"
             "DRAWING_LAYER" -> "drawing_overlay_source"
             "SCREEN_REGION" -> "android_screen_region"
             "SOUNDBOARD_SOURCE" -> "soundboard_sfx"
