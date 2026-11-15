@@ -5,6 +5,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.mobilelabs.media.AudioDelayRingBuffer
 import com.example.mobilelabs.media.FlvH264Helper
 import com.example.mobilelabs.model.RecordingFormat
+import com.example.mobilelabs.model.VideoConfig
 import com.example.mobilelabs.persistence.SceneCollectionRepository
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -78,12 +79,12 @@ class MobileLabsPipelineRegressionTest {
         val repo = SceneCollectionRepository(ctx)
         repo.saveSettingsAtomic(
             SceneCollectionRepository.PersistedSettings(
-                recordingFormat = RecordingFormat.SEGMENTED_MP4.name,
+                videoConfig = VideoConfig(recordingFormat = RecordingFormat.SEGMENTED_MP4),
                 audioSyncOffsetsMs = mapOf("audio_game" to -120, "audio_mic" to 85)
             )
         )
         val loaded = repo.loadSettings()
-        assertEquals(RecordingFormat.SEGMENTED_MP4.name, loaded.recordingFormat)
+        assertEquals(RecordingFormat.SEGMENTED_MP4, loaded.videoConfig.recordingFormat)
         assertEquals(-120, loaded.audioSyncOffsetsMs["audio_game"])
         assertEquals(85, loaded.audioSyncOffsetsMs["audio_mic"])
     }
@@ -95,7 +96,7 @@ class MobileLabsPipelineRegressionTest {
         val tempFile = File(ctx.filesDir, "orphaned_test.mp4")
         tempFile.writeBytes(ByteArray(4096) { 0x1A })
 
-        repo.writeActiveRecordingMarker(tempFile.absolutePath)
+        repo.markActiveRecording(tempFile, System.currentTimeMillis())
         val detected = repo.detectIncompleteRecordings()
         assertTrue(detected.any { it.filePath == tempFile.absolutePath })
 

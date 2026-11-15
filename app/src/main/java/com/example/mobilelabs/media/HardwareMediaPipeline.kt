@@ -6,7 +6,7 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMuxer
-import android.net.Uri
+import androidx.core.net.toUri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
@@ -689,7 +689,7 @@ class HardwareMediaPipeline(
     private fun publishToSafTree(sourceFile: File, treeUriStr: String): String? {
         return runCatching {
             val resolver = context.contentResolver
-            val treeUri = Uri.parse(treeUriStr)
+            val treeUri = treeUriStr.toUri()
             val parentDocUri = DocumentsContract.buildDocumentUriUsingTree(
                 treeUri,
                 DocumentsContract.getTreeDocumentId(treeUri)

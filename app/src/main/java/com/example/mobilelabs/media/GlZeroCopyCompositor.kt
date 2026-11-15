@@ -227,9 +227,10 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         glHandler = handler
 
         handler.post {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && appContext != null) {
+            val ctx = appContext
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && ctx != null) {
                 runCatching {
-                    val mgr = appContext.getSystemService(PerformanceHintManager::class.java)
+                    val mgr = ctx.getSystemService(PerformanceHintManager::class.java)
                     val targetNs = 1_000_000_000L / max(1, videoConfig.fps)
                     adpfLastTargetNs = targetNs
                     adpfSession = mgr?.createHintSession(intArrayOf(Process.myTid()), targetNs)

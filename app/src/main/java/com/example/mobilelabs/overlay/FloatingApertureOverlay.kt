@@ -91,6 +91,7 @@ class FloatingApertureOverlay(
         scheduleDim()
     }
 
+    @SuppressLint("ClickableViewAccessibility")
     fun show(initialX: Int, initialY: Int) {
         if (isShowing || !Settings.canDrawOverlays(context)) return
 
