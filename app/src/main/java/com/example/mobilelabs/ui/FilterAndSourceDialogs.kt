@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -32,6 +34,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -41,10 +45,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.mobilelabs.model.AudioChannelState
 import com.example.mobilelabs.model.AudioFilterConfig
+import com.example.mobilelabs.model.FacecamShape
 import com.example.mobilelabs.model.LutPreset
 import com.example.mobilelabs.model.ScaleFilterType
 import com.example.mobilelabs.model.SourceModel
@@ -52,6 +58,7 @@ import com.example.mobilelabs.model.SourceType
 import com.example.mobilelabs.model.VideoFilterConfig
 import com.example.ui.theme.ApertureRed
 import com.example.ui.theme.ApertureRedHi
+import com.example.ui.theme.ObsSelectionBlue
 import com.example.ui.theme.StatusOk
 import com.example.ui.theme.StatusWarn
 import com.example.ui.theme.StudioDivider
@@ -66,40 +73,46 @@ fun AddSourcePhase2Dialog(
     onDismiss: () -> Unit,
     onAddStandardSource: (SourceType) -> Unit,
     onPickImageFile: () -> Unit,
+    onPickGifFile: () -> Unit,
     onPickMediaFile: () -> Unit
 ) {
+    val grouped = remember { SourceType.entries.groupBy { it.category } }
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = SurfaceLevel1,
-        title = { Text("Add Source", color = StudioText) },
+        title = { Text("Add Source (OBS + Pro Studio)", color = StudioText) },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                SourceType.entries.forEach { type ->
-                    OutlinedButton(
-                        onClick = {
-                            onDismiss()
-                            when (type) {
-                                SourceType.IMAGE_SOURCE -> onPickImageFile()
-                                SourceType.MEDIA_SOURCE -> onPickMediaFile()
-                                else -> onAddStandardSource(type)
-                            }
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("add_source_type_${type.name.lowercase()}")
-                    ) {
-                        Text(type.label, color = StudioText)
+                grouped.forEach { (category, types) ->
+                    Text(
+                        text = category.uppercase(Locale.US),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = ApertureRedHi,
+                        fontWeight = FontWeight.Bold
+                    )
+                    types.forEach { type ->
+                        OutlinedButton(
+                            onClick = {
+                                onDismiss()
+                                when (type) {
+                                    SourceType.IMAGE_SOURCE -> onPickImageFile()
+                                    SourceType.GIF_STICKER -> onPickGifFile()
+                                    SourceType.MEDIA_SOURCE -> onPickMediaFile()
+                                    else -> onAddStandardSource(type)
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("add_source_type_${type.name.lowercase()}")
+                        ) {
+                            Text(type.label, color = StudioText)
+                        }
                     }
+                    HorizontalDivider(color = StudioDivider)
                 }
-                HorizontalDivider(color = StudioDivider)
-                Text(
-                    text = "Browser Source deferred in Phase 2 (WebView CPU copy overhead would degrade Geometry Dash/osu! 60fps; see docs).",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = StudioTextDim
-                )
             }
         },
         confirmButton = {},
@@ -115,17 +128,48 @@ fun SourcePropertiesDialog(
     onDismiss: () -> Unit,
     onUpdateSource: ((SourceModel) -> SourceModel) -> Unit,
     onRelinkImage: (String) -> Unit,
-    onRelinkMedia: (String) -> Unit
+    onRelinkGif: (String) -> Unit,
+    onRelinkMedia: (String) -> Unit,
+    onReloadBrowserSource: (String) -> Unit,
+    onControlTimer: (String, String) -> Unit,
+    onAdjustScoreboard: (String, Boolean, Int) -> Unit,
+    onResetScoreboard: (String) -> Unit,
+    onOpenLiveChat: () -> Unit,
+    onClearDrawing: () -> Unit
 ) {
     var nameInput by remember(source.id) { mutableStateOf(source.name) }
     var textInput by remember(source.id) { mutableStateOf(source.textContent) }
-    var textSize by remember(source.id) { mutableStateOf(source.textSizeSp) }
+    var textSize by remember(source.id) { mutableFloatStateOf(source.textSizeSp) }
     var textColor by remember(source.id) { mutableStateOf(source.textColorArgb) }
     var textBgColor by remember(source.id) { mutableStateOf(source.textBgColorArgb) }
     var colorArgb by remember(source.id) { mutableStateOf(source.colorArgb) }
     var mediaLoop by remember(source.id) { mutableStateOf(source.mediaLoop) }
     var mediaMuted by remember(source.id) { mutableStateOf(source.mediaMuted) }
     var mediaPlaying by remember(source.id) { mutableStateOf(source.mediaPlaying) }
+
+    // Camera facecam mask + border
+    var facecamShape by remember(source.id) { mutableStateOf(source.facecamShape) }
+    var borderWidthPx by remember(source.id) { mutableFloatStateOf(source.borderWidthPx) }
+    var borderColorArgb by remember(source.id) { mutableStateOf(source.borderColorArgb) }
+    var mirrorHorizontal by remember(source.id) { mutableStateOf(source.mirrorHorizontal) }
+    var useFrontCam by remember(source.id) { mutableStateOf(source.useFrontCamera) }
+
+    // Browser source
+    var browserUrl by remember(source.id) { mutableStateOf(source.browserUrl) }
+    var browserFpsCap by remember(source.id) { mutableIntStateOf(source.browserFpsCap) }
+    var browserTransparentBg by remember(source.id) { mutableStateOf(source.browserTransparentBg) }
+
+    // Timer source
+    var timerCountDown by remember(source.id) { mutableStateOf(source.timerCountDown) }
+    var timerTargetSec by remember(source.id) { mutableIntStateOf(source.timerTargetSec) }
+
+    // Scoreboard source
+    var scoreHomeName by remember(source.id) { mutableStateOf(source.scoreHomeName) }
+    var scoreAwayName by remember(source.id) { mutableStateOf(source.scoreAwayName) }
+
+    // Chat overlay
+    var chatOpacity by remember(source.id) { mutableFloatStateOf(source.chatOverlayOpacity) }
+    var chatMaxMessages by remember(source.id) { mutableIntStateOf(source.chatOverlayMaxMessages) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -144,6 +188,138 @@ fun SourcePropertiesDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
                 when (source.type) {
+                    SourceType.CAMERA_2 -> {
+                        Row(horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Text("Front Camera", color = StudioText)
+                            Switch(checked = useFrontCam, onCheckedChange = { useFrontCam = it })
+                        }
+                        Row(horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Text("Mirror Horizontal", color = StudioText)
+                            Switch(checked = mirrorHorizontal, onCheckedChange = { mirrorHorizontal = it })
+                        }
+                        Text("Facecam Mask Shape (GPU SDF)", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
+                        Row(
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            FacecamShape.entries.forEach { shape ->
+                                val active = facecamShape == shape
+                                OutlinedButton(
+                                    onClick = { facecamShape = shape },
+                                    border = BorderStroke(1.dp, if (active) ApertureRedHi else StudioDivider),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    modifier = Modifier.height(34.dp)
+                                ) { Text(shape.label, fontSize = 11.sp, color = StudioText) }
+                            }
+                        }
+                        Text("Frame Border Width: ${borderWidthPx.toInt()} px", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
+                        Slider(value = borderWidthPx, onValueChange = { borderWidthPx = it }, valueRange = 0f..14f)
+                        ColorSwatchRow(
+                            selected = borderColorArgb,
+                            options = listOf(0xFFCC1B1BL, 0xFFFFFFFFL, 0xFF9146FFL, 0xFF43B581L, 0xFFF5A524L),
+                            onSelect = { borderColorArgb = it }
+                        )
+                    }
+                    SourceType.BROWSER_SOURCE -> {
+                        OutlinedTextField(
+                            value = browserUrl,
+                            onValueChange = { browserUrl = it },
+                            label = { Text("Browser / Alert Box URL (https://...)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().testTag("browser_url_input")
+                        )
+                        Text("Render FPS Cap (saves game FPS): $browserFpsCap fps", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf(10, 15, 20, 30).forEach { cap ->
+                                val active = browserFpsCap == cap
+                                OutlinedButton(
+                                    onClick = { browserFpsCap = cap },
+                                    border = BorderStroke(1.dp, if (active) ObsSelectionBlue else StudioDivider),
+                                    modifier = Modifier.height(34.dp)
+                                ) { Text("${cap} fps", fontSize = 11.sp, color = StudioText) }
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Text("Transparent Background", color = StudioText)
+                            Switch(checked = browserTransparentBg, onCheckedChange = { browserTransparentBg = it })
+                        }
+                        OutlinedButton(onClick = { onReloadBrowserSource(source.id) }) {
+                            Text("Reload Browser Source", color = StudioText)
+                        }
+                    }
+                    SourceType.TIMER_SOURCE -> {
+                        Row(horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Text("Countdown Mode (off = Stopwatch)", color = StudioText)
+                            Switch(checked = timerCountDown, onCheckedChange = { timerCountDown = it })
+                        }
+                        if (timerCountDown) {
+                            Text("Target Duration: ${timerTargetSec}s", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                listOf(60, 180, 300, 600).forEach { sec ->
+                                    val active = timerTargetSec == sec
+                                    OutlinedButton(
+                                        onClick = { timerTargetSec = sec },
+                                        border = BorderStroke(1.dp, if (active) ApertureRedHi else StudioDivider),
+                                        modifier = Modifier.height(34.dp)
+                                    ) { Text("${sec / 60}m", fontSize = 11.sp, color = StudioText) }
+                                }
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = { onControlTimer(source.id, if (source.timerRunning) "pause" else "start") },
+                                colors = ButtonDefaults.buttonColors(containerColor = ObsSelectionBlue)
+                            ) { Text(if (source.timerRunning) "Pause" else "Start", color = StudioText) }
+                            OutlinedButton(onClick = { onControlTimer(source.id, "reset") }) { Text("Reset", color = StudioText) }
+                        }
+                        ColorSwatchRow(selected = textColor, options = listOf(0xFFFFFFFFL, 0xFFF5A524L, 0xFFFF4D4FL, 0xFF43B581L), onSelect = { textColor = it })
+                        ColorSwatchRow(selected = textBgColor, options = listOf(0x00000000L, 0x9916161AL, 0xCC720000L), onSelect = { textBgColor = it })
+                    }
+                    SourceType.SCOREBOARD_SOURCE -> {
+                        OutlinedTextField(
+                            value = scoreHomeName,
+                            onValueChange = { scoreHomeName = it },
+                            label = { Text("Home / Player 1 Label") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = scoreAwayName,
+                            onValueChange = { scoreAwayName = it },
+                            label = { Text("Away / Player 2 Label") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Text("Score: $scoreHomeName ${source.scoreHome} : ${source.scoreAway} $scoreAwayName", color = StudioText)
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(onClick = { onAdjustScoreboard(source.id, true, 1) }) { Text("+1 P1", color = StudioText) }
+                            OutlinedButton(onClick = { onAdjustScoreboard(source.id, false, 1) }) { Text("+1 P2", color = StudioText) }
+                            TextButton(onClick = { onResetScoreboard(source.id) }) { Text("Reset", color = StatusWarn) }
+                        }
+                    }
+                    SourceType.CHAT_OVERLAY -> {
+                        Text("Box Opacity: ${(chatOpacity * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
+                        Slider(value = chatOpacity, onValueChange = { chatOpacity = it }, valueRange = 0.1f..1f)
+                        Text("Max Lines: $chatMaxMessages", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf(4, 7, 10, 14).forEach { count ->
+                                OutlinedButton(
+                                    onClick = { chatMaxMessages = count },
+                                    border = BorderStroke(1.dp, if (chatMaxMessages == count) ObsSelectionBlue else StudioDivider),
+                                    modifier = Modifier.height(32.dp)
+                                ) { Text("$count", fontSize = 11.sp, color = StudioText) }
+                            }
+                        }
+                        OutlinedButton(onClick = { onDismiss(); onOpenLiveChat() }) {
+                            Text("Open Live Chat Drawer", color = StudioText)
+                        }
+                    }
+                    SourceType.DRAWING_LAYER -> {
+                        Text("Draw directly over the stage using the Ink toggle on the top bar.", style = MaterialTheme.typography.bodySmall, color = StudioTextDim)
+                        OutlinedButton(onClick = onClearDrawing) {
+                            Text("Clear All Ink Strokes", color = ApertureRedHi)
+                        }
+                    }
                     SourceType.TEXT_SOURCE -> {
                         OutlinedTextField(
                             value = textInput,
@@ -174,13 +350,15 @@ fun SourcePropertiesDialog(
                             onSelect = { colorArgb = it }
                         )
                     }
-                    SourceType.IMAGE_SOURCE -> {
+                    SourceType.IMAGE_SOURCE, SourceType.GIF_STICKER -> {
                         Text("File: ${source.mediaPathOrUri?.substringAfterLast('/') ?: "None"}", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
                         if (source.erroredReason != null) {
                             Text(source.erroredReason, style = MaterialTheme.typography.labelSmall, color = StatusWarn)
                         }
-                        OutlinedButton(onClick = { onRelinkImage(source.id) }) {
-                            Text("Choose / Relink Image", color = StudioText)
+                        OutlinedButton(onClick = {
+                            if (source.type == SourceType.GIF_STICKER) onRelinkGif(source.id) else onRelinkImage(source.id)
+                        }) {
+                            Text(if (source.type == SourceType.GIF_STICKER) "Choose / Relink GIF" else "Choose / Relink Image", color = StudioText)
                         }
                     }
                     SourceType.MEDIA_SOURCE -> {
@@ -203,6 +381,18 @@ fun SourcePropertiesDialog(
                         OutlinedButton(onClick = { onRelinkMedia(source.id) }) {
                             Text("Choose / Relink Video", color = StudioText)
                         }
+                    }
+                    SourceType.SCREEN_REGION -> {
+                        Text(
+                            "Cropped Screen Region: select the 'Crop' tool in Edit menu or drag green edge handles on the canvas to isolate a game HUD, radar, or sub-window.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = StudioTextDim
+                        )
+                        Text(
+                            "Crop L:${(source.transform.cropLeft * 100).toInt()}% T:${(source.transform.cropTop * 100).toInt()}% R:${(source.transform.cropRight * 100).toInt()}% B:${(source.transform.cropBottom * 100).toInt()}%",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = StudioText
+                        )
                     }
                     else -> {
                         Text(
@@ -227,7 +417,21 @@ fun SourcePropertiesDialog(
                             colorArgb = colorArgb,
                             mediaLoop = mediaLoop,
                             mediaMuted = mediaMuted,
-                            mediaPlaying = mediaPlaying
+                            mediaPlaying = mediaPlaying,
+                            useFrontCamera = useFrontCam,
+                            facecamShape = facecamShape,
+                            borderWidthPx = borderWidthPx,
+                            borderColorArgb = borderColorArgb,
+                            mirrorHorizontal = mirrorHorizontal,
+                            browserUrl = browserUrl.trim().ifBlank { cur.browserUrl },
+                            browserFpsCap = browserFpsCap,
+                            browserTransparentBg = browserTransparentBg,
+                            timerCountDown = timerCountDown,
+                            timerTargetSec = timerTargetSec,
+                            scoreHomeName = scoreHomeName.ifBlank { cur.scoreHomeName },
+                            scoreAwayName = scoreAwayName.ifBlank { cur.scoreAwayName },
+                            chatOverlayOpacity = chatOpacity,
+                            chatOverlayMaxMessages = chatMaxMessages
                         )
                     }
                     onDismiss()
@@ -254,7 +458,7 @@ fun AudioFiltersDialog(
             color = SurfaceLevel1,
             shape = RoundedCornerShape(8.dp),
             border = BorderStroke(1.dp, StudioDivider),
-            modifier = Modifier.fillMaxWidth(0.76f).fillMaxHeight(0.84f)
+            modifier = Modifier.fillMaxWidth(0.78f).fillMaxHeight(0.86f)
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -288,6 +492,11 @@ fun AudioFiltersDialog(
                         Text("Ceiling: ${String.format(Locale.US, "%.1f dB", cfg.limiterCeilingDb)}", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
                         Slider(value = cfg.limiterCeilingDb, onValueChange = { cfg = cfg.copy(limiterCeilingDb = it) }, valueRange = -12f..-0.2f)
                     }
+                    FilterToggleCard("Sidechain Auto-Ducking (Lowers Game when Speaking)", cfg.autoDuckingEnabled, { cfg = cfg.copy(autoDuckingEnabled = it) }) {
+                        Text("Duck Amount: ${cfg.duckAmountDb.toInt()} dB", style = MaterialTheme.typography.labelSmall, color = StudioTextDim)
+                        Slider(value = cfg.duckAmountDb, onValueChange = { cfg = cfg.copy(duckAmountDb = it) }, valueRange = -24f..-2f)
+                    }
+                    FilterToggleCard("Push-to-Talk Mode (Mic Muted Unless Holding PTT)", cfg.pushToTalkEnabled, { cfg = cfg.copy(pushToTalkEnabled = it) }) {}
                 }
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     OutlinedButton(onClick = { cfg = AudioFilterConfig() }) { Text("Reset All Off", color = StudioTextDim) }

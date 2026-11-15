@@ -7,6 +7,7 @@ import android.net.Uri
 import com.example.mobilelabs.model.AppProfile
 import com.example.mobilelabs.model.AudioFilterConfig
 import com.example.mobilelabs.model.DownscaleFilter
+import com.example.mobilelabs.model.FacecamShape
 import com.example.mobilelabs.model.IncompleteRecording
 import com.example.mobilelabs.model.LutPreset
 import com.example.mobilelabs.model.PresetId
@@ -16,6 +17,7 @@ import com.example.mobilelabs.model.ScaleFilterType
 import com.example.mobilelabs.model.SceneCollection
 import com.example.mobilelabs.model.SceneModel
 import com.example.mobilelabs.model.ScreenFitMode
+import com.example.mobilelabs.model.SoundboardPad
 import com.example.mobilelabs.model.SourceModel
 import com.example.mobilelabs.model.SourceTransform
 import com.example.mobilelabs.model.SourceType
@@ -23,6 +25,7 @@ import com.example.mobilelabs.model.TransitionType
 import com.example.mobilelabs.model.VideoConfig
 import com.example.mobilelabs.model.VideoFilterConfig
 import com.example.mobilelabs.model.defaultSceneCollection
+import com.example.mobilelabs.model.defaultSoundboardPads
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -63,6 +66,9 @@ class SceneCollectionRepository(private val context: Context) {
         val adaptiveQualityLocked: Boolean = false,
         val onboardingCompleted: Boolean = false,
         val dualDestinationEnabled: Boolean = false,
+        val replayBufferEnabled: Boolean = false,
+        val replayDurationSec: Int = 30,
+        val soundboardPads: List<SoundboardPad> = defaultSoundboardPads(),
         val benchmarkRecords: List<com.example.mobilelabs.model.BenchmarkRecord> = emptyList()
     )
 
@@ -111,12 +117,17 @@ class SceneCollectionRepository(private val context: Context) {
             val resolver = context.contentResolver
             val mime = resolver.getType(uri).orEmpty()
             val ext = when {
+                mime.contains("gif") -> "gif"
                 mime.contains("png") -> "png"
                 mime.contains("webp") -> "webp"
                 mime.contains("jpeg") || mime.contains("jpg") -> "jpg"
                 mime.contains("mp4") -> "mp4"
                 mime.contains("webm") -> "webm"
                 mime.contains("matroska") || mime.contains("mkv") -> "mkv"
+                mime.contains("wav") -> "wav"
+                mime.contains("mpeg") || mime.contains("mp3") -> "mp3"
+                mime.contains("ogg") -> "ogg"
+                mime.contains("aac") || mime.contains("m4a") -> "m4a"
                 else -> "dat"
             }
             val dst = File(mediaAssetsDir, "${prefix}_${System.currentTimeMillis()}.$ext")
@@ -160,6 +171,10 @@ class SceneCollectionRepository(private val context: Context) {
                                     put("visible", src.visible)
                                     put("locked", src.locked)
                                     put("useFrontCamera", src.useFrontCamera)
+                                    put("facecamShape", src.facecamShape.name)
+                                    put("borderWidthPx", src.borderWidthPx.toDouble())
+                                    put("borderColorArgb", src.borderColorArgb)
+                                    put("mirrorHorizontal", src.mirrorHorizontal)
                                     put("mediaPathOrUri", src.mediaPathOrUri)
                                     put("mediaLoop", src.mediaLoop)
                                     put("mediaMuted", src.mediaMuted)
@@ -169,6 +184,21 @@ class SceneCollectionRepository(private val context: Context) {
                                     put("textBgColorArgb", src.textBgColorArgb)
                                     put("textSizeSp", src.textSizeSp.toDouble())
                                     put("colorArgb", src.colorArgb)
+                                    put("browserUrl", src.browserUrl)
+                                    put("browserFpsCap", src.browserFpsCap)
+                                    put("browserTransparentBg", src.browserTransparentBg)
+                                    put("browserWidthPx", src.browserWidthPx)
+                                    put("browserHeightPx", src.browserHeightPx)
+                                    put("timerTargetSec", src.timerTargetSec)
+                                    put("timerCountDown", src.timerCountDown)
+                                    put("scoreHomeName", src.scoreHomeName)
+                                    put("scoreAwayName", src.scoreAwayName)
+                                    put("scoreHome", src.scoreHome)
+                                    put("scoreAway", src.scoreAway)
+                                    put("drawingBrushColorArgb", src.drawingBrushColorArgb)
+                                    put("drawingBrushSizePx", src.drawingBrushSizePx.toDouble())
+                                    put("chatOverlayOpacity", src.chatOverlayOpacity.toDouble())
+                                    put("chatOverlayMaxMessages", src.chatOverlayMaxMessages)
                                     put("transform", JSONObject().apply {
                                         put("x", src.transform.xFraction.toDouble())
                                         put("y", src.transform.yFraction.toDouble())
@@ -208,7 +238,7 @@ class SceneCollectionRepository(private val context: Context) {
                             }.getOrDefault(SourceType.COLOR_SOURCE)
                             val mediaPath = srcObj.optString("mediaPathOrUri", "").ifBlank { null }
                             val missingErr = if (
-                                (srcType == SourceType.IMAGE_SOURCE || srcType == SourceType.MEDIA_SOURCE) &&
+                                (srcType == SourceType.IMAGE_SOURCE || srcType == SourceType.MEDIA_SOURCE || srcType == SourceType.GIF_STICKER) &&
                                 mediaPath != null &&
                                 !mediaPath.startsWith("content://") &&
                                 !File(mediaPath).exists()
@@ -225,6 +255,12 @@ class SceneCollectionRepository(private val context: Context) {
                                     locked = srcObj.optBoolean("locked", false),
                                     erroredReason = missingErr,
                                     useFrontCamera = srcObj.optBoolean("useFrontCamera", true),
+                                    facecamShape = runCatching {
+                                        FacecamShape.valueOf(srcObj.optString("facecamShape", FacecamShape.RECTANGLE.name))
+                                    }.getOrDefault(FacecamShape.RECTANGLE),
+                                    borderWidthPx = srcObj.optDouble("borderWidthPx", 0.0).toFloat(),
+                                    borderColorArgb = srcObj.optLong("borderColorArgb", 0xFFCC1B1BL),
+                                    mirrorHorizontal = srcObj.optBoolean("mirrorHorizontal", false),
                                     mediaPathOrUri = mediaPath,
                                     mediaLoop = srcObj.optBoolean("mediaLoop", true),
                                     mediaMuted = srcObj.optBoolean("mediaMuted", false),
@@ -234,6 +270,21 @@ class SceneCollectionRepository(private val context: Context) {
                                     textBgColorArgb = srcObj.optLong("textBgColorArgb", 0x9916161AL),
                                     textSizeSp = srcObj.optDouble("textSizeSp", 44.0).toFloat(),
                                     colorArgb = srcObj.optLong("colorArgb", 0xFF720000L),
+                                    browserUrl = srcObj.optString("browserUrl", "https://streamlabs.com/widgets/alert-box/v3/demo"),
+                                    browserFpsCap = srcObj.optInt("browserFpsCap", 20).coerceIn(5, 30),
+                                    browserTransparentBg = srcObj.optBoolean("browserTransparentBg", true),
+                                    browserWidthPx = srcObj.optInt("browserWidthPx", 800).coerceIn(160, 1920),
+                                    browserHeightPx = srcObj.optInt("browserHeightPx", 600).coerceIn(120, 1080),
+                                    timerTargetSec = srcObj.optInt("timerTargetSec", 300).coerceIn(5, 86400),
+                                    timerCountDown = srcObj.optBoolean("timerCountDown", true),
+                                    scoreHomeName = srcObj.optString("scoreHomeName", "P1"),
+                                    scoreAwayName = srcObj.optString("scoreAwayName", "P2"),
+                                    scoreHome = srcObj.optInt("scoreHome", 0),
+                                    scoreAway = srcObj.optInt("scoreAway", 0),
+                                    drawingBrushColorArgb = srcObj.optLong("drawingBrushColorArgb", 0xFFFF3B30L),
+                                    drawingBrushSizePx = srcObj.optDouble("drawingBrushSizePx", 10.0).toFloat(),
+                                    chatOverlayOpacity = srcObj.optDouble("chatOverlayOpacity", 0.72).toFloat(),
+                                    chatOverlayMaxMessages = srcObj.optInt("chatOverlayMaxMessages", 7).coerceIn(2, 15),
                                     transform = if (tObj != null) {
                                         SourceTransform(
                                             xFraction = tObj.optDouble("x", 0.0).toFloat(),
@@ -294,6 +345,19 @@ class SceneCollectionRepository(private val context: Context) {
             put("adaptiveQualityLocked", settings.adaptiveQualityLocked)
             put("onboardingCompleted", settings.onboardingCompleted)
             put("dualDestinationEnabled", settings.dualDestinationEnabled)
+            put("replayBufferEnabled", settings.replayBufferEnabled)
+            put("replayDurationSec", settings.replayDurationSec)
+            put("soundboardPads", JSONArray().apply {
+                settings.soundboardPads.forEach { pad ->
+                    put(JSONObject().apply {
+                        put("id", pad.id)
+                        put("label", pad.label)
+                        put("filePath", pad.filePath)
+                        put("builtInTone", pad.builtInTone)
+                        put("volume", pad.volume.toDouble())
+                    })
+                }
+            })
             put("benchmarkRecords", JSONArray().apply {
                 settings.benchmarkRecords.forEach { b ->
                     put(JSONObject().apply {
@@ -407,6 +471,24 @@ class SceneCollectionRepository(private val context: Context) {
                 }
             }
 
+            val pads = buildList {
+                val padsArr = obj.optJSONArray("soundboardPads")
+                if (padsArr != null) {
+                    for (i in 0 until padsArr.length()) {
+                        val p = padsArr.optJSONObject(i) ?: continue
+                        add(
+                            SoundboardPad(
+                                id = p.optString("id", "sfx_$i"),
+                                label = p.optString("label", "SFX ${i + 1}"),
+                                filePath = p.optString("filePath", "").ifBlank { null },
+                                builtInTone = p.optString("builtInTone", "").ifBlank { null },
+                                volume = p.optDouble("volume", 0.85).toFloat().coerceIn(0f, 1f)
+                            )
+                        )
+                    }
+                }
+            }.ifEmpty { defaultSoundboardPads() }
+
             PersistedSettings(
                 videoConfig = videoConfig,
                 floatingOverlayEnabled = obj.optBoolean("floatingOverlayEnabled", false),
@@ -426,6 +508,9 @@ class SceneCollectionRepository(private val context: Context) {
                 adaptiveQualityLocked = obj.optBoolean("adaptiveQualityLocked", false),
                 onboardingCompleted = obj.optBoolean("onboardingCompleted", false),
                 dualDestinationEnabled = obj.optBoolean("dualDestinationEnabled", false),
+                replayBufferEnabled = obj.optBoolean("replayBufferEnabled", false),
+                replayDurationSec = obj.optInt("replayDurationSec", 30).coerceIn(10, 120),
+                soundboardPads = pads,
                 benchmarkRecords = benchmarks
             )
         }.getOrElse { PersistedSettings(savedCollections = listSavedCollectionNames()) }
@@ -494,6 +579,9 @@ class SceneCollectionRepository(private val context: Context) {
         put("compressorMakeupDb", f.compressorMakeupDb.toDouble())
         put("limiterEnabled", f.limiterEnabled)
         put("limiterCeilingDb", f.limiterCeilingDb.toDouble())
+        put("autoDuckingEnabled", f.autoDuckingEnabled)
+        put("duckAmountDb", f.duckAmountDb.toDouble())
+        put("pushToTalkEnabled", f.pushToTalkEnabled)
     }
 
     private fun decodeAudioFilter(obj: JSONObject): AudioFilterConfig = AudioFilterConfig(
@@ -508,7 +596,10 @@ class SceneCollectionRepository(private val context: Context) {
         compressorRatio = obj.optDouble("compressorRatio", 4.0).toFloat(),
         compressorMakeupDb = obj.optDouble("compressorMakeupDb", 3.0).toFloat(),
         limiterEnabled = obj.optBoolean("limiterEnabled", false),
-        limiterCeilingDb = obj.optDouble("limiterCeilingDb", -1.5).toFloat()
+        limiterCeilingDb = obj.optDouble("limiterCeilingDb", -1.5).toFloat(),
+        autoDuckingEnabled = obj.optBoolean("autoDuckingEnabled", false),
+        duckAmountDb = obj.optDouble("duckAmountDb", -10.0).toFloat(),
+        pushToTalkEnabled = obj.optBoolean("pushToTalkEnabled", false)
     )
 
     private fun encodeVideoFilters(f: VideoFilterConfig): JSONObject = JSONObject().apply {

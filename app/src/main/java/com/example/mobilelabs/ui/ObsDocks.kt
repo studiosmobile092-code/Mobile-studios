@@ -139,6 +139,9 @@ data class DockCallbacks(
     val onArmOrDisarm: () -> Unit,
     val onToggleStream: () -> Unit,
     val onToggleRecord: () -> Unit,
+    val onPauseResumeRecord: () -> Unit,
+    val onSaveReplay: () -> Unit,
+    val onOpenConnections: () -> Unit,
     val onOpenDiagnostics: () -> Unit,
     val onOpenSettings: () -> Unit,
     val onExitApp: () -> Unit
@@ -221,6 +224,8 @@ fun ObsBottomDocksRow(
                 sessionPhase = state.sessionPhase,
                 recordingPhase = state.recordingPhase,
                 studioModeEnabled = state.studioModeEnabled,
+                replayEnabled = state.replayBuffer.enabled,
+                platformsConnectedCount = listOf(state.youtubeConnection.connected, state.twitchConnection.connected).count { it },
                 collapsed = collapsed,
                 isExpanded = expanded == DockPanelId.CONTROLS,
                 callbacks = callbacks,
@@ -644,6 +649,8 @@ private fun ControlsDock(
     sessionPhase: SessionPhase,
     recordingPhase: RecordingPhase,
     studioModeEnabled: Boolean,
+    replayEnabled: Boolean,
+    platformsConnectedCount: Int,
     collapsed: Boolean,
     isExpanded: Boolean,
     callbacks: DockCallbacks,
@@ -654,6 +661,8 @@ private fun ControlsDock(
         sessionPhase == SessionPhase.CONNECTING ||
         sessionPhase == SessionPhase.RECONNECTING
     val isRecording = recordingPhase == RecordingPhase.RECORDING
+    val isPaused = recordingPhase == RecordingPhase.PAUSED
+    val isRecActive = isRecording || isPaused
 
     DockFrame(
         title = "Controls",
@@ -691,14 +700,57 @@ private fun ControlsDock(
                 onClick = callbacks.onToggleStream,
                 modifier = Modifier.weight(1f)
             )
-            ObsControlButton(
-                label = if (isRecording) "Stop Recording" else "Start Recording",
-                enabled = isArmedOrBeyond,
-                bgColor = if (isRecording) ApertureRed else ObsControlBtn,
-                testTag = "record_toggle_button",
-                onClick = callbacks.onToggleRecord,
-                modifier = Modifier.weight(1f)
-            )
+            if (isRecActive) {
+                Row(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    ObsControlButton(
+                        label = "Stop Rec",
+                        enabled = true,
+                        bgColor = ApertureRed,
+                        testTag = "record_toggle_button",
+                        onClick = callbacks.onToggleRecord,
+                        modifier = Modifier.weight(0.55f).fillMaxHeight()
+                    )
+                    ObsControlButton(
+                        label = if (isPaused) "Resume" else "Pause",
+                        enabled = true,
+                        bgColor = if (isPaused) StatusWarn.copy(alpha = 0.7f) else ObsSelectionBlue,
+                        testTag = "pause_resume_record_button",
+                        onClick = callbacks.onPauseResumeRecord,
+                        modifier = Modifier.weight(0.45f).fillMaxHeight()
+                    )
+                }
+            } else {
+                ObsControlButton(
+                    label = "Start Recording",
+                    enabled = isArmedOrBeyond,
+                    bgColor = ObsControlBtn,
+                    testTag = "record_toggle_button",
+                    onClick = callbacks.onToggleRecord,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            if (replayEnabled && isArmedOrBeyond) {
+                ObsControlButton(
+                    label = "Save Instant Replay",
+                    dotColor = StatusOk,
+                    bgColor = ObsSelectionBlue,
+                    testTag = "dock_save_replay_button",
+                    onClick = callbacks.onSaveReplay,
+                    modifier = Modifier.weight(1f)
+                )
+            } else {
+                ObsControlButton(
+                    label = if (platformsConnectedCount > 0) "YT/TW ($platformsConnectedCount Ready)" else "Connect YT / Twitch",
+                    dotColor = if (platformsConnectedCount > 0) StatusOk else null,
+                    bgColor = ObsControlBtn,
+                    testTag = "dock_connections_button",
+                    onClick = callbacks.onOpenConnections,
+                    modifier = Modifier.weight(1f)
+                )
+            }
             ObsControlButton(
                 label = if (studioModeEnabled) "Studio Mode: ON" else "Studio Mode",
                 bgColor = if (studioModeEnabled) ObsSelectionBlue else ObsControlBtn,
@@ -706,18 +758,23 @@ private fun ControlsDock(
                 onClick = callbacks.onToggleStudioMode,
                 modifier = Modifier.weight(1f)
             )
-            ObsControlButton(
-                label = "Settings",
-                testTag = "open_settings_button",
-                onClick = callbacks.onOpenSettings,
-                modifier = Modifier.weight(1f)
-            )
-            ObsControlButton(
-                label = "Exit",
-                testTag = "exit_button",
-                onClick = callbacks.onExitApp,
-                modifier = Modifier.weight(1f)
-            )
+            Row(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                ObsControlButton(
+                    label = "Settings",
+                    testTag = "open_settings_button",
+                    onClick = callbacks.onOpenSettings,
+                    modifier = Modifier.weight(0.62f).fillMaxHeight()
+                )
+                ObsControlButton(
+                    label = "Exit",
+                    testTag = "exit_button",
+                    onClick = callbacks.onExitApp,
+                    modifier = Modifier.weight(0.38f).fillMaxHeight()
+                )
+            }
         }
     }
 }

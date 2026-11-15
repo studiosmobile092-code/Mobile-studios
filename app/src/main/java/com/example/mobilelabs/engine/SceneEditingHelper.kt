@@ -21,6 +21,21 @@ object SceneEditingHelper {
                 name = "Tablet Screen",
                 type = SourceType.SCREEN_CAPTURE
             )
+            SourceType.SCREEN_REGION -> SourceModel(
+                id = "src_region_$ts",
+                name = "Screen Region",
+                type = SourceType.SCREEN_REGION,
+                transform = SourceTransform(
+                    xFraction = 0.06f,
+                    yFraction = 0.08f,
+                    widthFraction = 0.42f,
+                    heightFraction = 0.42f,
+                    cropLeft = 0.10f,
+                    cropTop = 0.10f,
+                    cropRight = 0.10f,
+                    cropBottom = 0.10f
+                )
+            )
             SourceType.CAMERA_2 -> SourceModel(
                 id = "src_cam_$ts",
                 name = "Facecam (Camera2)",
@@ -35,6 +50,15 @@ object SceneEditingHelper {
                 mediaPathOrUri = pathOrUri,
                 transform = SourceTransform(0.05f, 0.06f, 0.28f, 0.28f)
             )
+            SourceType.GIF_STICKER -> SourceModel(
+                id = "src_gif_$ts",
+                name = "GIF Sticker",
+                type = SourceType.GIF_STICKER,
+                mediaPathOrUri = pathOrUri,
+                mediaLoop = true,
+                mediaPlaying = true,
+                transform = SourceTransform(0.70f, 0.08f, 0.24f, 0.24f)
+            )
             SourceType.MEDIA_SOURCE -> SourceModel(
                 id = "src_media_$ts",
                 name = "Media Video",
@@ -44,6 +68,25 @@ object SceneEditingHelper {
                 mediaPlaying = true,
                 transform = SourceTransform(0.10f, 0.12f, 0.42f, 0.42f)
             )
+            SourceType.BROWSER_SOURCE -> SourceModel(
+                id = "src_browser_$ts",
+                name = "Browser / Alert URL",
+                type = SourceType.BROWSER_SOURCE,
+                browserUrl = pathOrUri ?: "https://streamlabs.com/widgets/alert-box/v3/demo",
+                browserFpsCap = 20,
+                browserTransparentBg = true,
+                browserWidthPx = 800,
+                browserHeightPx = 600,
+                transform = SourceTransform(0.20f, 0.08f, 0.60f, 0.45f)
+            )
+            SourceType.CHAT_OVERLAY -> SourceModel(
+                id = "src_chat_$ts",
+                name = "Live Chat Box",
+                type = SourceType.CHAT_OVERLAY,
+                chatOverlayOpacity = 0.72f,
+                chatOverlayMaxMessages = 7,
+                transform = SourceTransform(0.03f, 0.44f, 0.32f, 0.48f)
+            )
             SourceType.TEXT_SOURCE -> SourceModel(
                 id = "src_text_$ts",
                 name = "Text Banner",
@@ -52,12 +95,46 @@ object SceneEditingHelper {
                 textSizeSp = 44f,
                 transform = SourceTransform(0.04f, 0.82f, 0.42f, 0.12f)
             )
+            SourceType.TIMER_SOURCE -> SourceModel(
+                id = "src_timer_$ts",
+                name = "Stream Timer",
+                type = SourceType.TIMER_SOURCE,
+                timerTargetSec = 300,
+                timerCountDown = true,
+                timerRunning = false,
+                textColorArgb = 0xFFFFFFFFL,
+                textBgColorArgb = 0xAA141418L,
+                transform = SourceTransform(0.36f, 0.05f, 0.28f, 0.12f)
+            )
+            SourceType.SCOREBOARD_SOURCE -> SourceModel(
+                id = "src_score_$ts",
+                name = "Scoreboard",
+                type = SourceType.SCOREBOARD_SOURCE,
+                scoreHomeName = "P1",
+                scoreAwayName = "P2",
+                scoreHome = 0,
+                scoreAway = 0,
+                transform = SourceTransform(0.30f, 0.04f, 0.40f, 0.12f)
+            )
+            SourceType.DRAWING_LAYER -> SourceModel(
+                id = "src_draw_$ts",
+                name = "Screen Ink Layer",
+                type = SourceType.DRAWING_LAYER,
+                drawingBrushColorArgb = 0xFFFF3B30L,
+                drawingBrushSizePx = 10f,
+                transform = SourceTransform(0f, 0f, 1f, 1f)
+            )
             SourceType.COLOR_SOURCE -> SourceModel(
                 id = "src_color_$ts",
                 name = "Color Backdrop",
                 type = SourceType.COLOR_SOURCE,
                 colorArgb = 0xFF720000L,
                 transform = SourceTransform(0f, 0f, 1f, 1f)
+            )
+            SourceType.SOUNDBOARD_SOURCE -> SourceModel(
+                id = "src_sfx_$ts",
+                name = "Soundboard SFX",
+                type = SourceType.SOUNDBOARD_SOURCE
             )
             SourceType.MIC_AUDIO -> SourceModel(
                 id = "src_mic_$ts",

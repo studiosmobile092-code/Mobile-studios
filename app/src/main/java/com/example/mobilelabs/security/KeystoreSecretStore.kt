@@ -7,7 +7,10 @@ import android.util.Base64
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.BuildConfig
+import com.example.mobilelabs.model.StreamingPlatform
 import kotlinx.coroutines.flow.first
+import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.security.KeyStore
 import javax.crypto.Cipher
@@ -18,10 +21,28 @@ import javax.crypto.spec.GCMParameterSpec
 private val Context.secretsDataStore by preferencesDataStore(name = "mobilelabs_keystore_secrets")
 
 /**
- * Stores primary & secondary RTMP stream keys encrypted via Android Keystore (AES-256-GCM).
- * Stream keys are never written to logs, crash dumps, or diagnostics exports (Iron Rule R13).
+ * Stores primary & secondary RTMP stream keys plus YouTube & Twitch OAuth tokens / Client IDs
+ * encrypted via Android Keystore (AES-256-GCM).
+ * Secrets are never written to logs, crash dumps, or diagnostics exports.
  */
 class KeystoreSecretStore(private val context: Context) {
+
+    data class PlatformCredentialBundle(
+        val accessToken: String = "",
+        val refreshToken: String = "",
+        val expiresAtMs: Long = 0L,
+        val channelName: String = "",
+        val broadcasterId: String = "",
+        val ingestUrl: String = "",
+        val streamKey: String = "",
+        val broadcastId: String = "",
+        val liveChatId: String = "",
+        val streamTitle: String = "Mobile Labs Live Stream",
+        val categoryName: String = "Games + Demos",
+        val categoryId: String = "",
+        val privacyStatus: String = "public",
+        val enabledForMultiStream: Boolean = true
+    )
 
     private val keyAlias = "mobilelabs_rtmp_stream_key_aes"
     private val encryptedKeyPref = stringPreferencesKey("encrypted_rtmp_stream_key")
@@ -32,6 +53,85 @@ class KeystoreSecretStore(private val context: Context) {
     private val secondaryEncryptedKeyPref = stringPreferencesKey("encrypted_secondary_rtmp_stream_key")
     private val secondaryServerUrlPref = stringPreferencesKey("secondary_rtmp_server_url")
     private val secondaryPresetPref = stringPreferencesKey("secondary_rtmp_service_preset")
+
+    private fun platformPrefKey(platform: StreamingPlatform) =
+        stringPreferencesKey("encrypted_oauth_${platform.name.lowercase()}")
+
+    private fun clientIdPrefKey(platform: StreamingPlatform) =
+        stringPreferencesKey("encrypted_client_id_${platform.name.lowercase()}")
+
+    suspend fun saveCustomClientId(platform: StreamingPlatform, clientId: String) {
+        val cleaned = clientId.trim()
+        context.secretsDataStore.edit { prefs ->
+            val key = clientIdPrefKey(platform)
+            if (cleaned.isBlank()) prefs.remove(key) else prefs[key] = encryptString(cleaned)
+        }
+    }
+
+    suspend fun loadCustomClientId(platform: StreamingPlatform): String = runCatching {
+        val encoded = context.secretsDataStore.data.first()[clientIdPrefKey(platform)] ?: return@runCatching ""
+        decryptString(encoded)
+    }.getOrDefault("")
+
+    suspend fun resolveClientId(platform: StreamingPlatform): String {
+        val custom = loadCustomClientId(platform).trim()
+        if (custom.isNotBlank()) return custom
+        return when (platform) {
+            StreamingPlatform.YOUTUBE -> sanitizeBuildConfigSecret(BuildConfig.YOUTUBE_OAUTH_CLIENT_ID)
+            StreamingPlatform.TWITCH -> sanitizeBuildConfigSecret(BuildConfig.TWITCH_OAUTH_CLIENT_ID)
+        }
+    }
+
+    suspend fun savePlatformBundle(platform: StreamingPlatform, bundle: PlatformCredentialBundle) {
+        val json = JSONObject().apply {
+            put("accessToken", bundle.accessToken)
+            put("refreshToken", bundle.refreshToken)
+            put("expiresAtMs", bundle.expiresAtMs)
+            put("channelName", bundle.channelName)
+            put("broadcasterId", bundle.broadcasterId)
+            put("ingestUrl", bundle.ingestUrl)
+            put("streamKey", bundle.streamKey)
+            put("broadcastId", bundle.broadcastId)
+            put("liveChatId", bundle.liveChatId)
+            put("streamTitle", bundle.streamTitle)
+            put("categoryName", bundle.categoryName)
+            put("categoryId", bundle.categoryId)
+            put("privacyStatus", bundle.privacyStatus)
+            put("enabledForMultiStream", bundle.enabledForMultiStream)
+        }.toString()
+        context.secretsDataStore.edit { prefs ->
+            prefs[platformPrefKey(platform)] = encryptString(json)
+        }
+    }
+
+    suspend fun loadPlatformBundle(platform: StreamingPlatform): PlatformCredentialBundle? = runCatching {
+        val encoded = context.secretsDataStore.data.first()[platformPrefKey(platform)] ?: return@runCatching null
+        val json = decryptString(encoded)
+        if (json.isBlank()) return@runCatching null
+        val obj = JSONObject(json)
+        PlatformCredentialBundle(
+            accessToken = obj.optString("accessToken", ""),
+            refreshToken = obj.optString("refreshToken", ""),
+            expiresAtMs = obj.optLong("expiresAtMs", 0L),
+            channelName = obj.optString("channelName", ""),
+            broadcasterId = obj.optString("broadcasterId", ""),
+            ingestUrl = obj.optString("ingestUrl", ""),
+            streamKey = obj.optString("streamKey", ""),
+            broadcastId = obj.optString("broadcastId", ""),
+            liveChatId = obj.optString("liveChatId", ""),
+            streamTitle = obj.optString("streamTitle", "Mobile Labs Live Stream"),
+            categoryName = obj.optString("categoryName", "Games + Demos"),
+            categoryId = obj.optString("categoryId", ""),
+            privacyStatus = obj.optString("privacyStatus", "public"),
+            enabledForMultiStream = obj.optBoolean("enabledForMultiStream", true)
+        )
+    }.getOrNull()
+
+    suspend fun clearPlatformBundle(platform: StreamingPlatform) {
+        context.secretsDataStore.edit { prefs ->
+            prefs.remove(platformPrefKey(platform))
+        }
+    }
 
     suspend fun saveStreamConfig(presetName: String, serverUrl: String, streamKeyPlain: String?) {
         context.secretsDataStore.edit { prefs ->
@@ -95,6 +195,8 @@ class KeystoreSecretStore(private val context: Context) {
 
     suspend fun getSecondaryMaskedPreview(): String = maskKey(loadSecondaryStreamKey())
 
+    fun maskSecret(key: String): String = maskKey(key)
+
     private fun maskKey(key: String): String {
         if (key.isBlank()) return "Not set"
         return if (key.length <= 4) "••••" else "••••••${key.takeLast(4)}"
@@ -147,6 +249,18 @@ class KeystoreSecretStore(private val context: Context) {
     }
 
     companion object {
+        fun sanitizeBuildConfigSecret(raw: String): String {
+            val cleaned = raw.trim().trim('"').trim()
+            if (cleaned.isBlank() ||
+                cleaned == "YOUR_YOUTUBE_OAUTH_CLIENT_ID" ||
+                cleaned == "YOUR_TWITCH_OAUTH_CLIENT_ID" ||
+                cleaned.startsWith("YOUR_")
+            ) {
+                return ""
+            }
+            return cleaned
+        }
+
         fun redactUrlAndKeys(
             input: String,
             streamKey: String? = null,
@@ -159,16 +273,17 @@ class KeystoreSecretStore(private val context: Context) {
             extraKeys.filter { it.isNotBlank() }.forEach { extra ->
                 out = out.replace(extra, "[REDACTED_KEY]")
             }
-            // Strip RTMP stream key suffix and query tokens in logs/diagnostics
             out = out.replace(
                 Regex("(rtmps?://[^/\\s]+/[^/\\s]+/)([^\\s]+)"),
                 "$1[REDACTED]"
             )
             out = out.replace(
-                Regex("(streamKey|key|token|auth)=[^&\\s]+", RegexOption.IGNORE_CASE),
+                Regex("(streamKey|key|token|auth|access_token|refresh_token)=[^&\\s]+", RegexOption.IGNORE_CASE),
                 "$1=[REDACTED]"
             )
+            out = out.replace(Regex("oauth:[A-Za-z0-9_\\-]+"), "oauth:[REDACTED]")
             return out
         }
     }
 }
+

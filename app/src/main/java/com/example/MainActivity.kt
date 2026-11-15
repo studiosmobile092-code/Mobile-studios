@@ -49,6 +49,7 @@ class MainActivity : ComponentActivity() {
 
         val app = application as MobileLabsApp
         val controller = app.sessionController
+        processOAuthIntent(intent, controller)
 
         setContent {
             MobileLabsTheme {
@@ -57,6 +58,7 @@ class MainActivity : ComponentActivity() {
 
                 var pendingMediaKind by remember { mutableStateOf<SourceType?>(null) }
                 var pendingRelinkSourceId by remember { mutableStateOf<String?>(null) }
+                var pendingSoundboardPadId by remember { mutableStateOf<String?>(null) }
                 var importMissingAssetsAlert by remember { mutableStateOf<List<String>?>(null) }
 
                 // Iron Rule R9: stop preview rendering & UI timers immediately on ON_STOP
@@ -118,7 +120,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                // Zero-permission Photo Picker for Images & Video Media Sources (Google Play Policy)
+                // Zero-permission Photo Picker for Images, GIF Stickers & Video Media Sources (Google Play Policy)
                 val photoPickerLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.PickVisualMedia()
                 ) { uri ->
@@ -132,6 +134,16 @@ class MainActivity : ComponentActivity() {
                         } else {
                             controller.importMediaSourceFromUri(kind, uri)
                         }
+                    }
+                }
+
+                val soundboardAudioPickerLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.OpenDocument()
+                ) { uri ->
+                    val padId = pendingSoundboardPadId
+                    pendingSoundboardPadId = null
+                    if (uri != null && padId != null) {
+                        controller.importSoundboardAudio(padId, uri)
                     }
                 }
 
@@ -207,6 +219,7 @@ class MainActivity : ComponentActivity() {
                         },
                         onToggleStream = controller::toggleStreamFromClient,
                         onToggleRecord = controller::toggleRecordFromClient,
+                        onPauseResumeRecord = controller::togglePauseRecord,
                         onSelectScene = controller::selectScene,
                         onCreateScene = controller::createScene,
                         onRenameScene = controller::renameScene,
@@ -222,6 +235,13 @@ class MainActivity : ComponentActivity() {
                                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                             )
                         },
+                        onPickGifForNewSource = {
+                            pendingMediaKind = SourceType.GIF_STICKER
+                            pendingRelinkSourceId = null
+                            photoPickerLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                            )
+                        },
                         onPickMediaForNewSource = {
                             pendingMediaKind = SourceType.MEDIA_SOURCE
                             pendingRelinkSourceId = null
@@ -231,6 +251,13 @@ class MainActivity : ComponentActivity() {
                         },
                         onRelinkImageSource = { srcId ->
                             pendingMediaKind = SourceType.IMAGE_SOURCE
+                            pendingRelinkSourceId = srcId
+                            photoPickerLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                            )
+                        },
+                        onRelinkGifSource = { srcId ->
+                            pendingMediaKind = SourceType.GIF_STICKER
                             pendingRelinkSourceId = srcId
                             photoPickerLauncher.launch(
                                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
@@ -311,6 +338,34 @@ class MainActivity : ComponentActivity() {
                         onToggleHud = controller::toggleHudExpanded,
                         onRunProbe = controller::runFullDeviceAndCodecProbe,
                         onExportDiagnostics = controller::exportDiagnosticsZip,
+                        onStartPlatformOAuth = controller::startPlatformOAuth,
+                        onDisconnectPlatform = controller::disconnectPlatform,
+                        onTogglePlatformMultiStream = controller::setPlatformMultiStreamEnabled,
+                        onUpdatePlatformBroadcastMeta = controller::updatePlatformBroadcastMeta,
+                        onSearchTwitchCategories = controller::searchTwitchCategories,
+                        onSaveCustomClientId = controller::saveCustomClientId,
+                        onToggleChatDrawer = controller::toggleChatDrawer,
+                        onSendChatMessage = controller::sendLiveChatMessage,
+                        onClearChatMessages = controller::clearChatMessages,
+                        onToggleReplayBuffer = controller::setReplayBufferEnabled,
+                        onSaveReplayClip = controller::saveReplayClip,
+                        onCaptureScreenshot = controller::captureCanvasScreenshot,
+                        onReloadBrowserSource = controller::reloadBrowserSource,
+                        onControlTimer = controller::controlTimer,
+                        onAdjustScoreboard = controller::adjustScoreboard,
+                        onResetScoreboard = controller::resetScoreboard,
+                        onSetDrawingMode = controller::setDrawingMode,
+                        onSetDrawingBrush = controller::setDrawingBrush,
+                        onAddDrawingStroke = controller::addDrawingStroke,
+                        onUndoDrawingStroke = controller::undoLastDrawingStroke,
+                        onClearDrawingStrokes = controller::clearDrawingStrokes,
+                        onTriggerSoundboardPad = controller::triggerSoundboardPad,
+                        onSetSoundboardPadVolume = controller::setSoundboardPadVolume,
+                        onPickSoundboardAudio = { padId ->
+                            pendingSoundboardPadId = padId
+                            soundboardAudioPickerLauncher.launch(arrayOf("audio/*"))
+                        },
+                        onSetPushToTalkHeld = controller::setPushToTalkHeld,
                         onExitApp = {
                             startService(
                                 Intent(this, CaptureForegroundService::class.java)
@@ -341,6 +396,25 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val controller = (application as MobileLabsApp).sessionController
+        processOAuthIntent(intent, controller)
+    }
+
+    private fun processOAuthIntent(
+        intent: Intent?,
+        controller: com.example.mobilelabs.engine.SessionController
+    ) {
+        val data = intent?.data ?: return
+        val scheme = data.scheme?.lowercase() ?: return
+        if (scheme == "com.mobilelabs.studio" || scheme == "mobilelabs") {
+            controller.handleOAuthRedirect(data)
+            intent.data = null
         }
     }
 

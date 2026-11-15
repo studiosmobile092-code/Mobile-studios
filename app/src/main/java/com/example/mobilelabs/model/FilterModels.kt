@@ -20,10 +20,14 @@ data class AudioFilterConfig(
     val compressorRatio: Float = 4f,
     val compressorMakeupDb: Float = 3f,
     val limiterEnabled: Boolean = false,
-    val limiterCeilingDb: Float = -1.5f
+    val limiterCeilingDb: Float = -1.5f,
+    val autoDuckingEnabled: Boolean = false,
+    val duckAmountDb: Float = -10f,
+    val pushToTalkEnabled: Boolean = false
 ) {
     fun anyActive(): Boolean =
-        gainEnabled || noiseSuppressionEnabled || noiseGateEnabled || compressorEnabled || limiterEnabled
+        gainEnabled || noiseSuppressionEnabled || noiseGateEnabled ||
+            compressorEnabled || limiterEnabled || autoDuckingEnabled || pushToTalkEnabled
 
     fun activeSummary(): String {
         val parts = buildList {
@@ -32,6 +36,8 @@ data class AudioFilterConfig(
             if (noiseGateEnabled) add("Gate")
             if (compressorEnabled) add("Comp")
             if (limiterEnabled) add("Lim")
+            if (autoDuckingEnabled) add("Duck")
+            if (pushToTalkEnabled) add("PTT")
         }
         return if (parts.isEmpty()) "Filters: Off" else parts.joinToString(" · ")
     }

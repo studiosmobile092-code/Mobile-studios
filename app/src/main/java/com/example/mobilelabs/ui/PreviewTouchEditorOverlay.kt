@@ -1,6 +1,7 @@
 package com.example.mobilelabs.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -24,19 +25,27 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import com.example.mobilelabs.model.DrawingStroke
 import com.example.mobilelabs.model.PreviewTool
 import com.example.mobilelabs.model.SceneModel
 import com.example.mobilelabs.model.ScreenFitMode
 import com.example.mobilelabs.model.SourceModel
-import com.example.ui.theme.ApertureRed
 import com.example.ui.theme.ApertureRedHi
 import com.example.ui.theme.StatusWarn
 import com.example.ui.theme.StudioDivider
@@ -45,7 +54,7 @@ import com.example.ui.theme.SurfaceLevel2
 import kotlin.math.roundToInt
 
 /**
- * Interactive 16:9 Canvas Touch Editor (M2.2).
+ * Interactive 16:9 Canvas Touch Editor (M2.2) + Freehand Ink Drawing Input.
  * Renders visual source bounding boxes, handles drag/resize/rotate/crop gestures,
  * magnetic center/edge snap guides, and respects lock & live-safety protection.
  */
@@ -57,6 +66,10 @@ fun PreviewTouchEditorOverlay(
     activeTool: PreviewTool,
     isTouchBlockedLive: Boolean,
     screenFitMode: ScreenFitMode = ScreenFitMode.CROP_TO_FILL,
+    drawingModeActive: Boolean = false,
+    drawingColorArgb: Long = 0xFFFF3B30L,
+    drawingBrushWidthFraction: Float = 0.008f,
+    onAddDrawingStroke: (DrawingStroke) -> Unit = {},
     onSelectSource: (String) -> Unit,
     onUnlockLiveTouch: () -> Unit,
     onDragSourceTransform: (
@@ -73,29 +86,87 @@ fun PreviewTouchEditorOverlay(
 ) {
     val visualSources = scene?.sources?.filter { it.type.isVisual && it.visible }.orEmpty()
     val selectedSrc = visualSources.firstOrNull { it.id == selectedSourceId }
+    val activeInkPoints = remember { mutableStateListOf<Pair<Float, Float>>() }
 
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
         val density = LocalDensity.current
         val canvasWpx = with(density) { maxWidth.toPx().coerceAtLeast(1f) }
         val canvasHpx = with(density) { maxHeight.toPx().coerceAtLeast(1f) }
 
-        // Background tap picks topmost source under finger
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .pointerInput(visualSources) {
-                    detectTapGestures { offset ->
-                        val nx = offset.x / canvasWpx
-                        val ny = offset.y / canvasHpx
-                        val hit = visualSources.lastOrNull { src ->
-                            val t = src.transform
-                            nx in t.xFraction..(t.xFraction + t.widthFraction) &&
-                                ny in t.yFraction..(t.yFraction + t.heightFraction)
-                        }
-                        if (hit != null) onSelectSource(hit.id)
+        // Background tap picks topmost source under finger (or freehand ink capture when drawingModeActive)
+        if (drawingModeActive) {
+            Canvas(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(drawingColorArgb, drawingBrushWidthFraction, canvasWpx, canvasHpx) {
+                        detectDragGestures(
+                            onDragStart = { start ->
+                                activeInkPoints.clear()
+                                activeInkPoints.add(
+                                    (start.x / canvasWpx).coerceIn(0f, 1f) to
+                                        (start.y / canvasHpx).coerceIn(0f, 1f)
+                                )
+                            },
+                            onDrag = { change, _ ->
+                                change.consume()
+                                activeInkPoints.add(
+                                    (change.position.x / canvasWpx).coerceIn(0f, 1f) to
+                                        (change.position.y / canvasHpx).coerceIn(0f, 1f)
+                                )
+                            },
+                            onDragEnd = {
+                                if (activeInkPoints.isNotEmpty()) {
+                                    onAddDrawingStroke(
+                                        DrawingStroke(
+                                            id = "ink_${System.currentTimeMillis()}",
+                                            colorArgb = drawingColorArgb,
+                                            strokeWidthFraction = drawingBrushWidthFraction,
+                                            points = activeInkPoints.toList()
+                                        )
+                                    )
+                                    activeInkPoints.clear()
+                                }
+                            },
+                            onDragCancel = { activeInkPoints.clear() }
+                        )
                     }
+            ) {
+                if (activeInkPoints.size > 1) {
+                    val path = Path().apply {
+                        moveTo(activeInkPoints[0].first * size.width, activeInkPoints[0].second * size.height)
+                        for (i in 1 until activeInkPoints.size) {
+                            lineTo(activeInkPoints[i].first * size.width, activeInkPoints[i].second * size.height)
+                        }
+                    }
+                    drawPath(
+                        path = path,
+                        color = Color(drawingColorArgb.toInt()),
+                        style = Stroke(
+                            width = (drawingBrushWidthFraction * size.width).coerceAtLeast(3f),
+                            cap = StrokeCap.Round,
+                            join = StrokeJoin.Round
+                        )
+                    )
                 }
-        )
+            }
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(visualSources) {
+                        detectTapGestures { offset ->
+                            val nx = offset.x / canvasWpx
+                            val ny = offset.y / canvasHpx
+                            val hit = visualSources.lastOrNull { src ->
+                                val t = src.transform
+                                nx in t.xFraction..(t.xFraction + t.widthFraction) &&
+                                    ny in t.yFraction..(t.yFraction + t.heightFraction)
+                            }
+                            if (hit != null) onSelectSource(hit.id)
+                        }
+                    }
+            )
+        }
 
         // 16:9 safe-crop guide lines when capturing 16:10 tablet display in CROP_TO_FILL mode
         if (screenFitMode == ScreenFitMode.CROP_TO_FILL) {

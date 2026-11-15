@@ -71,6 +71,7 @@ import com.example.mobilelabs.model.AdaptiveQualityLevel
 import com.example.mobilelabs.model.AudioChannelState
 import com.example.mobilelabs.model.AudioFilterConfig
 import com.example.mobilelabs.model.DockPanelId
+import com.example.mobilelabs.model.DrawingStroke
 import com.example.mobilelabs.model.GamingScenePreset
 import com.example.mobilelabs.model.MobileLabsUiState
 import com.example.mobilelabs.model.PresetId
@@ -81,6 +82,7 @@ import com.example.mobilelabs.model.ScreenFitMode
 import com.example.mobilelabs.model.SessionPhase
 import com.example.mobilelabs.model.SourceModel
 import com.example.mobilelabs.model.SourceType
+import com.example.mobilelabs.model.StreamingPlatform
 import com.example.mobilelabs.model.TransitionType
 import com.example.mobilelabs.model.VideoConfig
 import com.example.mobilelabs.model.VideoFilterConfig
@@ -105,6 +107,7 @@ data class WorkspaceCallbacks(
     val onArmOrDisarm: () -> Unit,
     val onToggleStream: () -> Unit,
     val onToggleRecord: () -> Unit,
+    val onPauseResumeRecord: () -> Unit,
     val onSelectScene: (String) -> Unit,
     val onCreateScene: (String) -> Unit,
     val onRenameScene: (String, String) -> Unit,
@@ -114,8 +117,10 @@ data class WorkspaceCallbacks(
     val onSelectSource: (String) -> Unit,
     val onAddSource: (SourceType) -> Unit,
     val onPickImageForNewSource: () -> Unit,
+    val onPickGifForNewSource: () -> Unit,
     val onPickMediaForNewSource: () -> Unit,
     val onRelinkImageSource: (String) -> Unit,
+    val onRelinkGifSource: (String) -> Unit,
     val onRelinkMediaSource: (String) -> Unit,
     val onUpdateSourceProperties: (String, (SourceModel) -> SourceModel) -> Unit,
     val onUpdateSourceVideoFilters: (String, VideoFilterConfig) -> Unit,
@@ -175,6 +180,31 @@ data class WorkspaceCallbacks(
     val onToggleHud: () -> Unit,
     val onRunProbe: () -> Unit,
     val onExportDiagnostics: () -> Unit,
+    val onStartPlatformOAuth: (StreamingPlatform) -> Unit,
+    val onDisconnectPlatform: (StreamingPlatform) -> Unit,
+    val onTogglePlatformMultiStream: (StreamingPlatform, Boolean) -> Unit,
+    val onUpdatePlatformBroadcastMeta: (StreamingPlatform, String, String, String, String) -> Unit,
+    val onSearchTwitchCategories: (String) -> Unit,
+    val onSaveCustomClientId: (StreamingPlatform, String) -> Unit,
+    val onToggleChatDrawer: () -> Unit,
+    val onSendChatMessage: (String, StreamingPlatform?) -> Unit,
+    val onClearChatMessages: () -> Unit,
+    val onToggleReplayBuffer: (Boolean, Int) -> Unit,
+    val onSaveReplayClip: () -> Unit,
+    val onCaptureScreenshot: () -> Unit,
+    val onReloadBrowserSource: (String) -> Unit,
+    val onControlTimer: (String, String) -> Unit,
+    val onAdjustScoreboard: (String, Boolean, Int) -> Unit,
+    val onResetScoreboard: (String) -> Unit,
+    val onSetDrawingMode: (Boolean) -> Unit,
+    val onSetDrawingBrush: (Long, Float) -> Unit,
+    val onAddDrawingStroke: (DrawingStroke) -> Unit,
+    val onUndoDrawingStroke: () -> Unit,
+    val onClearDrawingStrokes: () -> Unit,
+    val onTriggerSoundboardPad: (String) -> Unit,
+    val onSetSoundboardPadVolume: (String, Float) -> Unit,
+    val onPickSoundboardAudio: (String) -> Unit,
+    val onSetPushToTalkHeld: (Boolean) -> Unit,
     val onExitApp: () -> Unit
 )
 
@@ -196,20 +226,24 @@ fun WorkspaceScreen(
     var confirmStopStream by remember { mutableStateOf(false) }
     var confirmStopRecord by remember { mutableStateOf(false) }
 
-    // Phase 3 Dialog States
+    // Phase 3 & Pro Studio Dialog States
     var showGamingPresets by remember { mutableStateOf(false) }
     var showSamsungAdaptive by remember { mutableStateOf(false) }
     var showOnboardingWizard by remember { mutableStateOf(false) }
     var showBenchmarkKit by remember { mutableStateOf(false) }
     var showAboutLicenses by remember { mutableStateOf(false) }
     var showPrecisionNudge by remember { mutableStateOf(false) }
+    var showConnections by remember { mutableStateOf(false) }
+    var showProTools by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         delay(350L)
         showSplash = false
     }
 
-    val liveOrRec = state.sessionPhase == SessionPhase.LIVE || state.recordingPhase == RecordingPhase.RECORDING
+    val liveOrRec = state.sessionPhase == SessionPhase.LIVE ||
+        state.recordingPhase == RecordingPhase.RECORDING ||
+        state.recordingPhase == RecordingPhase.PAUSED
     val isTouchBlockedLive = liveOrRec && !state.studioModeEnabled && state.lockPreviewTouchWhileLive && !state.unlockLiveTouchOverride
 
     val editableSceneId = if (state.studioModeEnabled) state.previewSceneId else state.sceneCollection.activeSceneId
@@ -228,7 +262,7 @@ fun WorkspaceScreen(
             PortraitRotatePanel(state = state)
         } else {
             Column(modifier = Modifier.fillMaxSize().background(ObsWindowBg)) {
-                // 1:1 OBS Classic Top Menu Bar: File | Edit | View | Profile | Scene Collection | Tools | Help
+                // 1:1 OBS Classic Top Menu Bar + Pro Quick Pills
                 ObsTopMenuBar(
                     state = state,
                     callbacks = callbacks,
@@ -241,7 +275,9 @@ fun WorkspaceScreen(
                     onOpenAbout = { showAboutLicenses = true },
                     onOpenSourceProps = { selectedSrc?.let { editingSourceProps = it } },
                     onToggleDocksCollapse = { docksCollapsed = !docksCollapsed },
-                    onTogglePrecisionNudge = { showPrecisionNudge = !showPrecisionNudge }
+                    onTogglePrecisionNudge = { showPrecisionNudge = !showPrecisionNudge },
+                    onOpenConnections = { showConnections = true },
+                    onOpenProTools = { showProTools = true }
                 )
 
                 // Non-intrusive conditional safety / recovery alerts
@@ -331,8 +367,15 @@ fun WorkspaceScreen(
                             if (busy) confirmStopStream = true else callbacks.onToggleStream()
                         },
                         onToggleRecord = {
-                            if (state.recordingPhase == RecordingPhase.RECORDING) confirmStopRecord = true else callbacks.onToggleRecord()
+                            if (state.recordingPhase == RecordingPhase.RECORDING || state.recordingPhase == RecordingPhase.PAUSED) {
+                                confirmStopRecord = true
+                            } else {
+                                callbacks.onToggleRecord()
+                            }
                         },
+                        onPauseResumeRecord = callbacks.onPauseResumeRecord,
+                        onSaveReplay = callbacks.onSaveReplayClip,
+                        onOpenConnections = { showConnections = true },
                         onOpenDiagnostics = { showDiagnostics = true },
                         onOpenSettings = { showSettings = true },
                         onExitApp = callbacks.onExitApp
@@ -346,6 +389,16 @@ fun WorkspaceScreen(
                     onOpenSamsungAdaptive = { callbacks.onRefreshSamsungAdvisor(); showSamsungAdaptive = true }
                 )
             }
+        }
+
+        if (state.chatDrawerOpen) {
+            LiveChatOverlayDrawer(
+                state = state,
+                onClose = callbacks.onToggleChatDrawer,
+                onSendChat = callbacks.onSendChatMessage,
+                onClearChat = callbacks.onClearChatMessages,
+                modifier = Modifier.align(Alignment.CenterEnd)
+            )
         }
 
         AnimatedVisibility(visible = showSplash, exit = fadeOut(animationSpec = tween(durationMillis = 140))) {
@@ -403,7 +456,43 @@ fun WorkspaceScreen(
             onDismiss = { showAddSource = false },
             onAddStandardSource = callbacks.onAddSource,
             onPickImageFile = callbacks.onPickImageForNewSource,
+            onPickGifFile = callbacks.onPickGifForNewSource,
             onPickMediaFile = callbacks.onPickMediaForNewSource
+        )
+    }
+
+    if (showConnections) {
+        ConnectionsAndMultiStreamDialog(
+            state = state,
+            onDismiss = { showConnections = false },
+            onStartOAuth = callbacks.onStartPlatformOAuth,
+            onDisconnect = callbacks.onDisconnectPlatform,
+            onToggleMultiStream = callbacks.onTogglePlatformMultiStream,
+            onUpdateBroadcastMeta = callbacks.onUpdatePlatformBroadcastMeta,
+            onSearchTwitchCategories = callbacks.onSearchTwitchCategories,
+            onSaveCustomClientId = callbacks.onSaveCustomClientId,
+            onOpenCustomRtmpSettings = { showSettings = true }
+        )
+    }
+
+    if (showProTools) {
+        ProToolsDialog(
+            state = state,
+            onDismiss = { showProTools = false },
+            onToggleReplayBuffer = callbacks.onToggleReplayBuffer,
+            onSaveReplayClip = callbacks.onSaveReplayClip,
+            onCaptureScreenshot = callbacks.onCaptureScreenshot,
+            onTriggerSoundboardPad = callbacks.onTriggerSoundboardPad,
+            onSetSoundboardPadVolume = callbacks.onSetSoundboardPadVolume,
+            onPickSoundboardAudio = callbacks.onPickSoundboardAudio,
+            onSetPushToTalkHeld = callbacks.onSetPushToTalkHeld,
+            onSetDrawingMode = callbacks.onSetDrawingMode,
+            onSetDrawingBrush = callbacks.onSetDrawingBrush,
+            onUndoDrawingStroke = callbacks.onUndoDrawingStroke,
+            onClearDrawingStrokes = callbacks.onClearDrawingStrokes,
+            onControlTimer = callbacks.onControlTimer,
+            onAdjustScoreboard = callbacks.onAdjustScoreboard,
+            onResetScoreboard = callbacks.onResetScoreboard
         )
     }
 
@@ -460,7 +549,14 @@ fun WorkspaceScreen(
             onDismiss = { editingSourceProps = null },
             onUpdateSource = { fn -> callbacks.onUpdateSourceProperties(src.id, fn) },
             onRelinkImage = { callbacks.onRelinkImageSource(it); editingSourceProps = null },
-            onRelinkMedia = { callbacks.onRelinkMediaSource(it); editingSourceProps = null }
+            onRelinkGif = { callbacks.onRelinkGifSource(it); editingSourceProps = null },
+            onRelinkMedia = { callbacks.onRelinkMediaSource(it); editingSourceProps = null },
+            onReloadBrowserSource = callbacks.onReloadBrowserSource,
+            onControlTimer = callbacks.onControlTimer,
+            onAdjustScoreboard = callbacks.onAdjustScoreboard,
+            onResetScoreboard = callbacks.onResetScoreboard,
+            onOpenLiveChat = callbacks.onToggleChatDrawer,
+            onClearDrawing = callbacks.onClearDrawingStrokes
         )
     }
 
@@ -578,7 +674,9 @@ private fun ObsTopMenuBar(
     onOpenAbout: () -> Unit,
     onOpenSourceProps: () -> Unit,
     onToggleDocksCollapse: () -> Unit,
-    onTogglePrecisionNudge: () -> Unit
+    onTogglePrecisionNudge: () -> Unit,
+    onOpenConnections: () -> Unit,
+    onOpenProTools: () -> Unit
 ) {
     var openMenu by remember { mutableStateOf<String?>(null) }
 
@@ -593,6 +691,8 @@ private fun ObsTopMenuBar(
         horizontalArrangement = Arrangement.spacedBy(2.dp)
     ) {
         ObsMenuButton("File", openMenu == "File", { openMenu = "File" }, { openMenu = null }) {
+            DropdownMenuItem(text = { Text("1-Click Connect (YouTube / Twitch)...", fontSize = 12.sp, color = StudioText) }, onClick = { openMenu = null; onOpenConnections() })
+            DropdownMenuItem(text = { Text("Snap Canvas PNG Screenshot", fontSize = 12.sp, color = StudioText) }, onClick = { openMenu = null; callbacks.onCaptureScreenshot() })
             DropdownMenuItem(text = { Text("Show Recordings & Probes", fontSize = 12.sp, color = StudioText) }, onClick = { openMenu = null; onOpenDiagnostics() })
             DropdownMenuItem(text = { Text("Settings", fontSize = 12.sp, color = StudioText) }, onClick = { openMenu = null; onOpenSettings() })
             HorizontalDivider(color = ObsBorder)
@@ -613,6 +713,8 @@ private fun ObsTopMenuBar(
 
         ObsMenuButton("View", openMenu == "View", { openMenu = "View" }, { openMenu = null }) {
             DropdownMenuItem(text = { Text(if (state.studioModeEnabled) "✓ Studio Mode" else "Studio Mode", fontSize = 12.sp, color = StudioText) }, onClick = { openMenu = null; callbacks.onToggleStudioMode() })
+            DropdownMenuItem(text = { Text(if (state.chatDrawerOpen) "✓ Live Chat Drawer" else "Live Chat Drawer", fontSize = 12.sp, color = StudioText) }, onClick = { openMenu = null; callbacks.onToggleChatDrawer() })
+            DropdownMenuItem(text = { Text(if (state.drawingModeActive) "✓ Screen Ink Drawing" else "Screen Ink Drawing", fontSize = 12.sp, color = StudioText) }, onClick = { openMenu = null; callbacks.onSetDrawingMode(!state.drawingModeActive) })
             DropdownMenuItem(text = { Text(if (state.hudExpanded) "✓ Diagnostics HUD" else "Diagnostics HUD", fontSize = 12.sp, color = StudioText) }, onClick = { openMenu = null; callbacks.onToggleHud() })
             DropdownMenuItem(text = { Text("Collapse / Expand Bottom Docks", fontSize = 12.sp, color = StudioText) }, onClick = { openMenu = null; onToggleDocksCollapse() })
             DropdownMenuItem(text = { Text(if (state.floatingOverlayEnabled) "✓ Floating Aperture Control" else "Floating Aperture Control", fontSize = 12.sp, color = StudioText) }, onClick = { openMenu = null; callbacks.onRequestEnableOverlay(!state.floatingOverlayEnabled) })
@@ -639,6 +741,7 @@ private fun ObsTopMenuBar(
         }
 
         ObsMenuButton("Tools", openMenu == "Tools", { openMenu = "Tools" }, { openMenu = null }) {
+            DropdownMenuItem(text = { Text("Pro Creator Tools (Replay / SFX / Ink)...", fontSize = 12.sp, color = StudioText) }, onClick = { openMenu = null; onOpenProTools() })
             DropdownMenuItem(text = { Text("Auto-Tune & Quick Setup Wizard", fontSize = 12.sp, color = StudioText) }, onClick = { openMenu = null; onOpenWizard() })
             DropdownMenuItem(text = { Text("Adaptive Quality & Samsung One UI Advisor", fontSize = 12.sp, color = StudioText) }, onClick = { openMenu = null; onOpenSamsungAdaptive() })
             DropdownMenuItem(text = { Text("Device & MediaCodec Probe", fontSize = 12.sp, color = StudioText) }, onClick = { openMenu = null; onOpenDiagnostics() })
@@ -652,28 +755,95 @@ private fun ObsTopMenuBar(
 
         Spacer(Modifier.weight(1f))
 
+        // Compact Pro Quick Action Pills (OBS Header Bar)
+        val connectedCount = listOf(state.youtubeConnection.connected, state.twitchConnection.connected).count { it }
+        TopBarPill(
+            text = if (connectedCount > 0) "YT/TW ($connectedCount)" else "Connect YT/TW",
+            active = connectedCount > 0,
+            activeColor = StatusOk.copy(alpha = 0.25f),
+            testTag = "topbar_connections_pill",
+            onClick = onOpenConnections
+        )
+        Spacer(Modifier.width(4.dp))
+        TopBarPill(
+            text = if (state.chatMessages.isEmpty()) "Chat" else "Chat (${state.chatMessages.size})",
+            active = state.chatDrawerOpen,
+            activeColor = ObsSelectionBlue,
+            testTag = "topbar_chat_pill",
+            onClick = callbacks.onToggleChatDrawer
+        )
+        Spacer(Modifier.width(4.dp))
+        TopBarPill(
+            text = "Pro / SFX",
+            active = state.replayBuffer.enabled,
+            activeColor = ApertureRed.copy(alpha = 0.65f),
+            testTag = "topbar_pro_tools_pill",
+            onClick = onOpenProTools
+        )
+        Spacer(Modifier.width(4.dp))
+        TopBarPill(
+            text = if (state.drawingModeActive) "Ink: ON" else "Ink",
+            active = state.drawingModeActive,
+            activeColor = StatusWarn.copy(alpha = 0.45f),
+            testTag = "topbar_ink_pill",
+            onClick = { callbacks.onSetDrawingMode(!state.drawingModeActive) }
+        )
+        if (state.sessionPhase != SessionPhase.IDLE && state.sessionPhase != SessionPhase.ERROR) {
+            Spacer(Modifier.width(4.dp))
+            TopBarPill(
+                text = "Shot",
+                active = false,
+                activeColor = ObsSelectionBlue,
+                testTag = "topbar_screenshot_pill",
+                onClick = callbacks.onCaptureScreenshot
+            )
+        }
+
         if (!state.onboardingCompleted) {
+            Spacer(Modifier.width(4.dp))
             Text(
-                text = "Quick Setup Wizard",
+                text = "Wizard",
                 fontSize = 10.sp,
                 color = StudioText,
                 modifier = Modifier
                     .background(ObsSelectionBlue, RoundedCornerShape(2.dp))
                     .clickable { onOpenWizard() }
-                    .padding(horizontal = 8.dp, vertical = 2.dp)
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
                     .testTag("quick_setup_pill")
             )
-            Spacer(Modifier.width(6.dp))
         }
 
+        Spacer(Modifier.width(6.dp))
         Text(
-            text = "Mobile Labs · ${state.sceneCollection.name}",
+            text = "Mobile Labs",
             fontSize = 11.sp,
             color = StudioTextDim,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
     }
+}
+
+@Composable
+private fun TopBarPill(
+    text: String,
+    active: Boolean,
+    activeColor: Color,
+    testTag: String,
+    onClick: () -> Unit
+) {
+    Text(
+        text = text,
+        fontSize = 10.sp,
+        fontWeight = FontWeight.Medium,
+        color = StudioText,
+        modifier = Modifier
+            .background(if (active) activeColor else ObsWellBg, RoundedCornerShape(3.dp))
+            .border(0.5.dp, ObsBorder, RoundedCornerShape(3.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 7.dp, vertical = 2.dp)
+            .testTag(testTag)
+    )
 }
 
 @Composable
@@ -795,6 +965,10 @@ private fun ObsPreviewStage(
                         activeTool = activeTool,
                         isTouchBlockedLive = isTouchBlockedLive,
                         screenFitMode = state.videoConfig.screenFitMode,
+                        drawingModeActive = state.drawingModeActive,
+                        drawingColorArgb = state.drawingColorArgb,
+                        drawingBrushWidthFraction = state.drawingBrushWidthFraction,
+                        onAddDrawingStroke = callbacks.onAddDrawingStroke,
                         onSelectSource = callbacks.onSelectSource,
                         onUnlockLiveTouch = callbacks.onUnlockLiveTouch,
                         onDragSourceTransform = callbacks.onDragSourceTransform,
@@ -822,8 +996,8 @@ private fun ObsPreviewStage(
             }
         }
 
-        val showNudgeOverlay = showPrecisionNudge ||
-            (selectedSrc != null && selectedSrc.type.isVisual && selectedSrc.type != SourceType.SCREEN_CAPTURE && !selectedSrc.locked)
+        val showNudgeOverlay = !state.drawingModeActive && (showPrecisionNudge ||
+            (selectedSrc != null && selectedSrc.type.isVisual && selectedSrc.type != SourceType.SCREEN_CAPTURE && !selectedSrc.locked))
         if (showNudgeOverlay && selectedSrc != null && selectedSrc.type.isVisual) {
             SelectedSourceNudgeBar(
                 source = selectedSrc,
@@ -832,6 +1006,38 @@ private fun ObsPreviewStage(
                 onFitToScreen = callbacks.onFitSelectedToScreen,
                 modifier = Modifier.align(Alignment.BottomStart).padding(8.dp)
             )
+        }
+
+        if (state.drawingModeActive) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(8.dp)
+                    .background(Color(0xE616161A), RoundedCornerShape(6.dp))
+                    .border(1.dp, StatusWarn, RoundedCornerShape(6.dp))
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text("INK MODE", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = StatusWarn)
+                listOf(0xFFFF3B30L, 0xFFF5A524L, 0xFF43B581L, 0xFF56B4E9L, 0xFFFFFFFFL).forEach { col ->
+                    Box(
+                        modifier = Modifier
+                            .size(20.dp)
+                            .background(Color(col.toInt()), CircleShape)
+                            .border(if (state.drawingColorArgb == col) 2.dp else 0.5.dp, Color.White, CircleShape)
+                            .clickable { callbacks.onSetDrawingBrush(col, state.drawingBrushWidthFraction) }
+                    )
+                }
+                TextButton(onClick = callbacks.onUndoDrawingStroke) { Text("Undo", fontSize = 11.sp, color = StudioText) }
+                TextButton(onClick = callbacks.onClearDrawingStrokes) { Text("Clear", fontSize = 11.sp, color = ApertureRedHi) }
+                Button(
+                    onClick = { callbacks.onSetDrawingMode(false) },
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = ObsSelectionBlue),
+                    modifier = Modifier.height(26.dp)
+                ) { Text("Done", fontSize = 11.sp, color = StudioText) }
+            }
         }
 
         if (hudExpanded) {
@@ -859,6 +1065,7 @@ private fun ObsBottomStatusBar(
     val totalDrops = t.renderSkippedFrames + t.encoderDroppedFrames + t.networkDroppedFrames
     val isLive = state.sessionPhase == SessionPhase.LIVE
     val isRec = state.recordingPhase == RecordingPhase.RECORDING
+    val isPaused = state.recordingPhase == RecordingPhase.PAUSED
 
     Row(
         modifier = Modifier
@@ -887,11 +1094,30 @@ private fun ObsBottomStatusBar(
             modifier = Modifier.clickable { onOpenSamsungAdaptive() }
         )
 
-        if (state.dualDestination.enabled) {
+        if (state.youtubeConnection.outputPhase == SessionPhase.LIVE || state.twitchConnection.outputPhase == SessionPhase.LIVE) {
+            val activePlatforms = buildList {
+                if (state.youtubeConnection.outputPhase == SessionPhase.LIVE) add("YT")
+                if (state.twitchConnection.outputPhase == SessionPhase.LIVE) add("TW")
+            }
+            Text(
+                text = "MULTI: ${activePlatforms.joinToString("+")}",
+                fontSize = 11.sp,
+                color = StatusOk,
+                fontWeight = FontWeight.Bold
+            )
+        } else if (state.dualDestination.enabled) {
             Text(
                 text = "DUAL: ${state.dualDestination.phase.displayLabel}",
                 fontSize = 11.sp,
                 color = if (state.dualDestination.phase == SessionPhase.LIVE) StatusOk else StudioTextDim
+            )
+        }
+
+        if (state.replayBuffer.enabled) {
+            Text(
+                text = "REPLAY: ${String.format(Locale.US, "%.0fs", state.replayBuffer.bufferedSeconds)}",
+                fontSize = 11.sp,
+                color = StatusOk
             )
         }
 
@@ -930,11 +1156,24 @@ private fun ObsBottomStatusBar(
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             modifier = Modifier.testTag("status_rec_badge")
         ) {
-            Box(modifier = Modifier.size(6.dp).background(if (isRec) ApertureRedHi else StudioTextDim, CircleShape))
+            Box(
+                modifier = Modifier.size(6.dp).background(
+                    when {
+                        isRec -> ApertureRedHi
+                        isPaused -> StatusWarn
+                        else -> StudioTextDim
+                    },
+                    CircleShape
+                )
+            )
             Text(
-                text = if (isRec) "REC: ${formatSeconds(t.recordDurationSec)}" else "REC: 00:00:00",
+                text = when {
+                    isRec -> "REC: ${formatSeconds(t.recordDurationSec)}"
+                    isPaused -> "PAUSED: ${formatSeconds(t.recordDurationSec)}"
+                    else -> "REC: 00:00:00"
+                },
                 fontSize = 11.sp,
-                color = if (isRec) StudioText else StudioTextDim
+                color = if (isRec || isPaused) StudioText else StudioTextDim
             )
         }
 

@@ -84,6 +84,9 @@ class CaptureForegroundService : Service() {
             context = this,
             onToggleStream = { app.sessionController.toggleStreamFromClient() },
             onToggleRecord = { app.sessionController.toggleRecordFromClient() },
+            onTogglePauseRecord = { app.sessionController.togglePauseRecord() },
+            onSaveReplay = { app.sessionController.saveReplayClip() },
+            onCaptureScreenshot = { app.sessionController.captureCanvasScreenshot() },
             onToggleMicMute = { app.sessionController.toggleAudioMute("audio_mic") },
             onToggleGameMute = { app.sessionController.toggleAudioMute("audio_game") },
             onNextScene = { app.sessionController.cycleNextSceneForOverlay() },
@@ -101,7 +104,12 @@ class CaptureForegroundService : Service() {
 
         scope.launch {
             app.sessionController.uiState.collectLatest { state ->
-                updateNotification(state.sessionPhase, state.recordingPhase, state.statusMessage)
+                updateNotification(
+                    state.sessionPhase,
+                    state.recordingPhase,
+                    state.replayBuffer.enabled,
+                    state.statusMessage
+                )
                 val micMuted = state.audioChannels.firstOrNull { it.id == "audio_mic" }?.muted == true
                 val gameMuted = state.audioChannels.firstOrNull { it.id == "audio_game" }?.muted == true
                 val activeSceneName = state.sceneCollection.scenes
@@ -112,6 +120,7 @@ class CaptureForegroundService : Service() {
                     thermal = state.telemetry.thermal,
                     micMuted = micMuted,
                     gameMuted = gameMuted,
+                    replayEnabled = state.replayBuffer.enabled,
                     sceneName = activeSceneName,
                     presetId = state.videoConfig.presetId
                 )
@@ -151,6 +160,10 @@ class CaptureForegroundService : Service() {
             }
             ACTION_STOP_STREAM -> app.sessionController.stopStreaming()
             ACTION_STOP_RECORD -> app.sessionController.stopRecording()
+            ACTION_PAUSE_RECORD -> app.sessionController.pauseRecording()
+            ACTION_RESUME_RECORD -> app.sessionController.resumeRecording()
+            ACTION_SAVE_REPLAY -> app.sessionController.saveReplayClip()
+            ACTION_SCREENSHOT -> app.sessionController.captureCanvasScreenshot()
             ACTION_DISARM -> {
                 releaseVirtualDisplayAndProjection()
                 app.sessionController.disarmSession()
@@ -165,7 +178,7 @@ class CaptureForegroundService : Service() {
     }
 
     private fun startForegroundWithActiveTypes(useMic: Boolean, useCam: Boolean) {
-        val notif = buildNotification(SessionPhase.ARMING, RecordingPhase.IDLE, "Arming capture...")
+        val notif = buildNotification(SessionPhase.ARMING, RecordingPhase.IDLE, false, "Arming capture...")
         var fgsType = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
         val hasMic = ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
@@ -267,15 +280,17 @@ class CaptureForegroundService : Service() {
     private fun updateNotification(
         sessionPhase: SessionPhase,
         recordingPhase: RecordingPhase,
+        replayEnabled: Boolean,
         statusMessage: String
     ) {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.notify(NOTIF_ID, buildNotification(sessionPhase, recordingPhase, statusMessage))
+        nm.notify(NOTIF_ID, buildNotification(sessionPhase, recordingPhase, replayEnabled, statusMessage))
     }
 
     private fun buildNotification(
         sessionPhase: SessionPhase,
         recordingPhase: RecordingPhase,
+        replayEnabled: Boolean,
         statusMessage: String
     ): Notification {
         val openPending = PendingIntent.getActivity(
@@ -301,7 +316,25 @@ class CaptureForegroundService : Service() {
             )
             builder.addAction(0, getString(R.string.action_stop_stream), stopStreamPi)
         }
-        if (recordingPhase == RecordingPhase.RECORDING) {
+        if (recordingPhase == RecordingPhase.RECORDING || recordingPhase == RecordingPhase.PAUSED) {
+            val pauseOrResumeAction = if (recordingPhase == RecordingPhase.PAUSED) {
+                ACTION_RESUME_RECORD
+            } else {
+                ACTION_PAUSE_RECORD
+            }
+            val pauseLabel = if (recordingPhase == RecordingPhase.PAUSED) {
+                getString(R.string.action_resume_record)
+            } else {
+                getString(R.string.action_pause_record)
+            }
+            val pauseRecPi = PendingIntent.getService(
+                this,
+                104,
+                Intent(this, CaptureForegroundService::class.java).setAction(pauseOrResumeAction),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            builder.addAction(0, pauseLabel, pauseRecPi)
+
             val stopRecPi = PendingIntent.getService(
                 this,
                 102,
@@ -309,6 +342,14 @@ class CaptureForegroundService : Service() {
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             )
             builder.addAction(0, getString(R.string.action_stop_record), stopRecPi)
+        } else if (replayEnabled) {
+            val replayPi = PendingIntent.getService(
+                this,
+                105,
+                Intent(this, CaptureForegroundService::class.java).setAction(ACTION_SAVE_REPLAY),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            builder.addAction(0, getString(R.string.action_save_replay), replayPi)
         }
         val disarmPi = PendingIntent.getService(
             this,
@@ -326,6 +367,10 @@ class CaptureForegroundService : Service() {
         const val ACTION_ARM_PROJECTION = "com.example.mobilelabs.ARM_PROJECTION"
         const val ACTION_STOP_STREAM = "com.example.mobilelabs.STOP_STREAM"
         const val ACTION_STOP_RECORD = "com.example.mobilelabs.STOP_RECORD"
+        const val ACTION_PAUSE_RECORD = "com.example.mobilelabs.PAUSE_RECORD"
+        const val ACTION_RESUME_RECORD = "com.example.mobilelabs.RESUME_RECORD"
+        const val ACTION_SAVE_REPLAY = "com.example.mobilelabs.SAVE_REPLAY"
+        const val ACTION_SCREENSHOT = "com.example.mobilelabs.SCREENSHOT"
         const val ACTION_DISARM = "com.example.mobilelabs.DISARM"
         const val ACTION_SYNC_OVERLAY = "com.example.mobilelabs.SYNC_OVERLAY"
 

@@ -107,11 +107,18 @@ class ObsEngineBridge(private val context: Context) {
     fun syncSourceTransform(sceneName: String, source: SourceModel) {
         if (!nativeStarted || !ObsNativeJni.isLibraryLoaded) return
         val obsId = when (source.type.name) {
-            "IMAGE_SOURCE" -> "image_source"
+            "IMAGE_SOURCE", "GIF_STICKER" -> "image_source"
             "MEDIA_SOURCE" -> "ffmpeg_source"
-            "TEXT_SOURCE" -> "text_ft2_source_v2"
+            "TEXT_SOURCE", "TIMER_SOURCE", "SCOREBOARD_SOURCE" -> "text_ft2_source_v2"
             "COLOR_SOURCE" -> "color_source_v2"
             "CAMERA_2" -> "android_camera2"
+            "BROWSER_SOURCE" -> "browser_source"
+            "CHAT_OVERLAY" -> "chat_overlay_source"
+            "DRAWING_LAYER" -> "drawing_overlay_source"
+            "SCREEN_REGION" -> "android_screen_region"
+            "SOUNDBOARD_SOURCE" -> "soundboard_sfx"
+            "MIC_AUDIO" -> "android_mic_audio"
+            "SYSTEM_AUDIO" -> "android_system_audio"
             else -> "android_screen_capture"
         }
         runCatching {
@@ -150,6 +157,8 @@ class ObsEngineBridge(private val context: Context) {
         if (filters.noiseGateEnabled) mask = mask or 4
         if (filters.compressorEnabled) mask = mask or 8
         if (filters.limiterEnabled) mask = mask or 16
+        if (filters.autoDuckingEnabled) mask = mask or 32
+        if (filters.pushToTalkEnabled) mask = mask or 64
         runCatching { ObsNativeJni.nativeSyncAudioFilterState(channelId, mask, filters.gainDb) }
     }
 

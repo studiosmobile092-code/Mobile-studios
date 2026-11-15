@@ -2,149 +2,96 @@ package com.example.mobilelabs.media
 
 import android.content.ContentValues
 import android.content.Context
+import android.graphics.Bitmap
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMuxer
-import androidx.core.net.toUri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.view.Surface
+import androidx.core.net.toUri
 import com.example.mobilelabs.model.EncoderFallbackLevel
 import com.example.mobilelabs.model.PublishedRecording
 import com.example.mobilelabs.model.RecordingFormat
 import com.example.mobilelabs.model.VideoConfig
 import com.example.mobilelabs.persistence.SceneCollectionRepository
-import java.io.BufferedInputStream
-import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
-import java.io.DataInputStream
-import java.io.DataOutputStream
 import java.io.File
 import java.io.FileInputStream
-import java.net.InetSocketAddress
-import java.net.Socket
 import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
-import javax.net.ssl.SSLSocketFactory
 
 /**
- * Pure Kotlin H.264 Annex-B <-> FLV AVCC framing utilities.
- * Converts MediaCodec Annex-B output (start-code prefixed) into ISO 14496-15
- * AVCDecoderConfigurationRecord + 4-byte length-prefixed AVCC NALUs required by RTMP/FLV.
+ * Pure monotonic PTS rebase calculator for Pause / Resume MP4 recording continuity.
  */
-object FlvH264Helper {
+class RecordingPtsRebaser {
+    private var basePtsUs: Long = -1L
+    private var totalPausedUs: Long = 0L
+    private var pausedAtUs: Long = -1L
+    var isPaused: Boolean = false
+        private set
+    var waitingForResumeKeyframe: Boolean = false
+        private set
 
-    fun splitAnnexBNalus(data: ByteArray): List<ByteArray> {
-        val result = ArrayList<ByteArray>(4)
-        var i = 0
-        val n = data.size
-        while (i < n) {
-            val scLen = startCodeLengthAt(data, i)
-            if (scLen > 0) {
-                val start = i + scLen
-                var end = start
-                while (end < n && startCodeLengthAt(data, end) == 0) {
-                    end++
-                }
-                if (end > start) {
-                    result += data.copyOfRange(start, end)
-                }
-                i = end
+    fun reset() {
+        basePtsUs = -1L
+        totalPausedUs = 0L
+        pausedAtUs = -1L
+        isPaused = false
+        waitingForResumeKeyframe = false
+    }
+
+    fun pause(currentRawPtsUs: Long) {
+        if (isPaused) return
+        isPaused = true
+        pausedAtUs = currentRawPtsUs
+    }
+
+    fun resume(currentRawPtsUs: Long) {
+        if (!isPaused) return
+        if (pausedAtUs >= 0L && currentRawPtsUs > pausedAtUs) {
+            totalPausedUs += (currentRawPtsUs - pausedAtUs)
+        }
+        pausedAtUs = -1L
+        isPaused = false
+        waitingForResumeKeyframe = true
+    }
+
+    /**
+     * Returns rebased microsecond PTS >= 0, or -1L if packet should be skipped (paused / pre-IDR after resume).
+     */
+    fun filterAndRebase(isVideo: Boolean, isKey: Boolean, rawPtsUs: Long): Long {
+        if (isPaused) return -1L
+        if (waitingForResumeKeyframe) {
+            if (isVideo && isKey) {
+                waitingForResumeKeyframe = false
             } else {
-                i++
+                return -1L
             }
         }
-        return result
-    }
-
-    fun buildAvcDecoderConfigRecord(sps: ByteArray, pps: ByteArray): ByteArray {
-        val cleanSps = stripStartCode(sps)
-        val cleanPps = stripStartCode(pps)
-        if (cleanSps.size < 4) return ByteArray(0)
-        val out = ByteArrayOutputStream(16 + cleanSps.size + cleanPps.size)
-        out.write(0x01) // configurationVersion
-        out.write(cleanSps[1].toInt() and 0xFF) // AVCProfileIndication
-        out.write(cleanSps[2].toInt() and 0xFF) // profile_compatibility
-        out.write(cleanSps[3].toInt() and 0xFF) // AVCLevelIndication
-        out.write(0xFF) // 4-byte NALU lengthSizeMinusOne = 3
-        out.write(0xE1) // 1 SPS
-        out.write((cleanSps.size ushr 8) and 0xFF)
-        out.write(cleanSps.size and 0xFF)
-        out.write(cleanSps)
-        if (cleanPps.isNotEmpty()) {
-            out.write(0x01) // 1 PPS
-            out.write((cleanPps.size ushr 8) and 0xFF)
-            out.write(cleanPps.size and 0xFF)
-            out.write(cleanPps)
-        } else {
-            out.write(0x00)
+        if (basePtsUs < 0L) {
+            if (isVideo && !isKey) return -1L
+            basePtsUs = rawPtsUs
         }
-        return out.toByteArray()
-    }
-
-    fun buildAvcDecoderConfigFromAnnexB(csd: ByteArray): ByteArray? {
-        val nalus = splitAnnexBNalus(csd)
-        val sps = nalus.firstOrNull { (it[0].toInt() and 0x1F) == 7 } ?: return null
-        val pps = nalus.firstOrNull { (it[0].toInt() and 0x1F) == 8 } ?: ByteArray(0)
-        val rec = buildAvcDecoderConfigRecord(sps, pps)
-        return rec.takeIf { it.isNotEmpty() }
-    }
-
-    fun annexBFrameToAvcc(payload: ByteArray): ByteArray {
-        val nalus = splitAnnexBNalus(payload)
-        if (nalus.isEmpty()) {
-            // Already AVCC length-prefixed if no Annex-B start codes exist
-            return payload
-        }
-        val out = ByteArrayOutputStream(payload.size + 16)
-        for (nalu in nalus) {
-            val nalType = nalu[0].toInt() and 0x1F
-            // Skip AUD / inline parameter sets because RTMP sends sequence header separately
-            if (nalType == 9 || nalType == 7 || nalType == 8) continue
-            val len = nalu.size
-            out.write((len ushr 24) and 0xFF)
-            out.write((len ushr 16) and 0xFF)
-            out.write((len ushr 8) and 0xFF)
-            out.write(len and 0xFF)
-            out.write(nalu)
-        }
-        return if (out.size() > 0) out.toByteArray() else payload
-    }
-
-    private fun stripStartCode(bytes: ByteArray): ByteArray {
-        val sc = startCodeLengthAt(bytes, 0)
-        return if (sc > 0 && sc < bytes.size) bytes.copyOfRange(sc, bytes.size) else bytes
-    }
-
-    private fun startCodeLengthAt(data: ByteArray, index: Int): Int {
-        if (index + 3 <= data.size &&
-            data[index].toInt() == 0 &&
-            data[index + 1].toInt() == 0
-        ) {
-            if (data[index + 2].toInt() == 1) return 3
-            if (index + 4 <= data.size &&
-                data[index + 2].toInt() == 0 &&
-                data[index + 3].toInt() == 1
-            ) return 4
-        }
-        return 0
+        return (rawPtsUs - basePtsUs - totalPausedUs).coerceAtLeast(0L)
     }
 }
 
 /**
- * Shared Hardware MediaCodec H.264 (Surface Input) + AAC Encoder + Independent Outputs (§6.5, §8):
- * - Single shared encode feeds both local MP4 recording and RTMP/RTMPS streaming (D5).
- * - Stream and recording are completely independent: failure of one never halts the other.
+ * Shared Hardware MediaCodec H.264 (Surface Input) + AAC Encoder + Independent Outputs:
+ * - Single shared encode feeds MP4 Recording (with Pause/Resume + PTS rebase),
+ *   OBS Instant Replay Buffer ring, and up to 4 concurrent RTMP/RTMPS destinations
+ *   (YouTube + Twitch + Dual + Custom RTMP).
  */
 class HardwareMediaPipeline(
     private val context: Context,
@@ -168,13 +115,12 @@ class HardwareMediaPipeline(
     private var audioEncoder: MediaCodec? = null
     private var audioDrainThread: Thread? = null
 
-    // Shared encoded formats and FLV sequence headers
     @Volatile private var currentVideoFormat: MediaFormat? = null
     @Volatile private var currentAudioFormat: MediaFormat? = null
     @Volatile private var videoConfigBytes: ByteArray? = null
     @Volatile private var audioConfigBytes: ByteArray? = null
 
-    // Independent Recording state
+    // Recording state + Pause/Resume PTS rebase
     private val recordingActive = AtomicBoolean(false)
     private var muxer: MediaMuxer? = null
     private var muxerVideoTrack = -1
@@ -185,14 +131,17 @@ class HardwareMediaPipeline(
     private var segmentStartMs = 0L
     private val recordBytesWritten = AtomicLong(0L)
     private val muxerLock = Any()
+    private val ptsRebaser = RecordingPtsRebaser()
+    @Volatile private var lastRawPtsUs = 0L
+    private var lastMuxerVideoPtsUs = -1L
+    private var lastMuxerAudioPtsUs = -1L
 
-    // Independent RTMP/RTMPS state (Primary + Phase 3 Dual Destination sharing the single HW encode)
-    private val streamActive = AtomicBoolean(false)
-    private var rtmpSender: RtmpFlvSender? = null
+    // Instant Replay Buffer
+    val replayRingBuffer = ReplayGopRingBuffer()
 
-    private val secondaryStreamActive = AtomicBoolean(false)
-    private var secondaryRtmpSender: RtmpFlvSender? = null
-    private val secondaryNetworkDroppedFrames = AtomicLong(0)
+    // Named RTMP / RTMPS senders (Primary + Secondary + YouTube + Twitch)
+    private val namedSenders = ConcurrentHashMap<String, RtmpFlvSender>()
+    private val namedDropCounters = ConcurrentHashMap<String, AtomicLong>()
 
     // Telemetry counters
     @Volatile var encoderMode = EncoderFallbackLevel.OPTIMAL_HW_SURFACE
@@ -200,6 +149,7 @@ class HardwareMediaPipeline(
     private val encodedVideoFrames = AtomicLong(0)
     private val encoderDroppedFrames = AtomicLong(0)
     private val networkDroppedFrames = AtomicLong(0)
+    private val secondaryNetworkDroppedFrames = AtomicLong(0)
     private val currentBitrateKbps = AtomicInteger(0)
     private var lastBitrateSampleMs = 0L
     private var bytesInWindow = 0L
@@ -221,6 +171,15 @@ class HardwareMediaPipeline(
         }
     }
 
+    fun requestKeyFrame() {
+        val codec = videoEncoder ?: return
+        runCatching {
+            codec.setParameters(Bundle().apply {
+                putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+            })
+        }
+    }
+
     fun startRecording(): File? {
         if (recordingActive.get()) return currentRecordFile
         val target = allocateRecordingFile()
@@ -235,8 +194,12 @@ class HardwareMediaPipeline(
                 recordStartMs = now
                 segmentStartMs = now
                 recordBytesWritten.set(0L)
+                ptsRebaser.reset()
+                lastMuxerVideoPtsUs = -1L
+                lastMuxerAudioPtsUs = -1L
                 maybeStartMuxerLocked()
             }
+            requestKeyFrame()
             repository.markActiveRecording(target, recordStartMs)
             recordingActive.set(true)
             target
@@ -245,6 +208,23 @@ class HardwareMediaPipeline(
             null
         }
     }
+
+    fun pauseRecording() {
+        if (!recordingActive.get()) return
+        synchronized(muxerLock) {
+            ptsRebaser.pause(lastRawPtsUs)
+        }
+    }
+
+    fun resumeRecording() {
+        if (!recordingActive.get()) return
+        synchronized(muxerLock) {
+            ptsRebaser.resume(lastRawPtsUs)
+        }
+        requestKeyFrame()
+    }
+
+    fun isRecordingPaused(): Boolean = synchronized(muxerLock) { ptsRebaser.isPaused }
 
     fun stopRecording() {
         if (!recordingActive.getAndSet(false)) return
@@ -262,11 +242,50 @@ class HardwareMediaPipeline(
             muxerVideoTrack = -1
             muxerAudioTrack = -1
             currentRecordFile = null
+            ptsRebaser.reset()
         }
         repository.clearActiveRecordingMarker()
         if (file != null && file.exists() && file.length() > 1024L) {
             finalizeAndPublishFile(file, durationSec)
         }
+    }
+
+    fun configureReplayBuffer(enabled: Boolean, durationSec: Int) {
+        replayRingBuffer.configure(enabled, durationSec)
+    }
+
+    fun saveReplayBufferClip(): PublishedRecording? {
+        val samples = replayRingBuffer.extractAlignedClipSamples()
+        return ReplayClipMuxer.writeReplayMp4(
+            repository = repository,
+            samples = samples,
+            videoFormat = currentVideoFormat,
+            audioFormat = currentAudioFormat,
+            publishFn = { f -> publishExistingPlayableFile(f) }
+        )
+    }
+
+    fun publishBitmapScreenshot(bitmap: Bitmap): String? {
+        return runCatching {
+            val stamp = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
+            val fileName = "MobileLabs_Shot_$stamp.png"
+            val resolver = context.contentResolver
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/Mobile Labs")
+                put(MediaStore.Images.Media.IS_PENDING, 1)
+            }
+            val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
+            resolver.openOutputStream(uri)?.use { out ->
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                out.flush()
+            }
+            values.clear()
+            values.put(MediaStore.Images.Media.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+            uri.toString()
+        }.getOrNull()
     }
 
     fun publishExistingPlayableFile(file: File): String? {
@@ -279,30 +298,18 @@ class HardwareMediaPipeline(
     }
 
     fun startStreaming(rtmpBaseUrl: String, streamKey: String, videoConfig: VideoConfig) {
-        if (streamActive.getAndSet(true)) return
-        val sender = RtmpFlvSender(
-            baseUrl = rtmpBaseUrl,
+        startNamedStream(
+            slotId = "primary",
+            rtmpBaseUrl = rtmpBaseUrl,
             streamKey = streamKey,
-            width = videoConfig.outputWidth,
-            height = videoConfig.outputHeight,
-            fps = videoConfig.fps,
-            videoBitrateKbps = videoConfig.videoBitrateKbps,
-            audioBitrateKbps = videoConfig.audioBitrateKbps,
+            videoConfig = videoConfig,
             onConnected = onStreamConnected,
-            onFailure = { reason ->
-                streamActive.set(false)
-                onStreamError(reason)
-            },
-            onNetworkDrop = { networkDroppedFrames.incrementAndGet() }
+            onError = onStreamError
         )
-        rtmpSender = sender
-        sender.start(videoConfigBytes, audioConfigBytes)
     }
 
     fun stopStreaming() {
-        if (!streamActive.getAndSet(false)) return
-        rtmpSender?.stop()
-        rtmpSender = null
+        stopNamedStream("primary")
     }
 
     fun startSecondaryStreaming(
@@ -312,7 +319,31 @@ class HardwareMediaPipeline(
         onConnected: () -> Unit,
         onError: (String) -> Unit
     ) {
-        if (secondaryStreamActive.getAndSet(true)) return
+        startNamedStream(
+            slotId = "secondary",
+            rtmpBaseUrl = rtmpBaseUrl,
+            streamKey = streamKey,
+            videoConfig = videoConfig,
+            onConnected = onConnected,
+            onError = onError
+        )
+    }
+
+    fun stopSecondaryStreaming() {
+        stopNamedStream("secondary")
+    }
+
+    fun startNamedStream(
+        slotId: String,
+        rtmpBaseUrl: String,
+        streamKey: String,
+        videoConfig: VideoConfig,
+        onConnected: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        stopNamedStream(slotId)
+        val dropCounter = namedDropCounters.getOrPut(slotId) { AtomicLong(0L) }
+        dropCounter.set(0L)
         val sender = RtmpFlvSender(
             baseUrl = rtmpBaseUrl,
             streamKey = streamKey,
@@ -323,20 +354,29 @@ class HardwareMediaPipeline(
             audioBitrateKbps = videoConfig.audioBitrateKbps,
             onConnected = onConnected,
             onFailure = { reason ->
-                secondaryStreamActive.set(false)
+                namedSenders.remove(slotId)
                 onError(reason)
             },
-            onNetworkDrop = { secondaryNetworkDroppedFrames.incrementAndGet() }
+            onNetworkDrop = {
+                dropCounter.incrementAndGet()
+                if (slotId == "primary") networkDroppedFrames.incrementAndGet()
+                if (slotId == "secondary") secondaryNetworkDroppedFrames.incrementAndGet()
+            }
         )
-        secondaryRtmpSender = sender
+        namedSenders[slotId] = sender
         sender.start(videoConfigBytes, audioConfigBytes)
     }
 
-    fun stopSecondaryStreaming() {
-        if (!secondaryStreamActive.getAndSet(false)) return
-        secondaryRtmpSender?.stop()
-        secondaryRtmpSender = null
+    fun stopNamedStream(slotId: String) {
+        namedSenders.remove(slotId)?.stop()
     }
+
+    fun stopAllStreams() {
+        namedSenders.keys.toList().forEach { stopNamedStream(it) }
+    }
+
+    fun getNamedBufferedBytes(slotId: String): Long = namedSenders[slotId]?.bufferedBytes() ?: 0L
+    fun getNamedDroppedFrames(slotId: String): Long = namedDropCounters[slotId]?.get() ?: 0L
 
     fun pushAudioPcm(pcm16Stereo: ShortArray, sampleCount: Int, ptsUs: Long) {
         val codec = audioEncoder ?: return
@@ -358,9 +398,9 @@ class HardwareMediaPipeline(
     }
 
     fun stopEncoders() {
-        stopStreaming()
-        stopSecondaryStreaming()
+        stopAllStreams()
         stopRecording()
+        replayRingBuffer.clear()
 
         videoRunning.set(false)
         onEncoderSurfaceReady(null)
@@ -379,9 +419,9 @@ class HardwareMediaPipeline(
         audioEncoder = null
     }
 
-    fun getEncoderQueueDepth(): Int = rtmpSender?.queueDepth() ?: 0
-    fun getRtmpBufferedBytes(): Long = rtmpSender?.bufferedBytes() ?: 0L
-    fun getSecondaryBufferedBytes(): Long = secondaryRtmpSender?.bufferedBytes() ?: 0L
+    fun getEncoderQueueDepth(): Int = namedSenders.values.maxOfOrNull { it.queueDepth() } ?: 0
+    fun getRtmpBufferedBytes(): Long = namedSenders.values.sumOf { it.bufferedBytes() }
+    fun getSecondaryBufferedBytes(): Long = getNamedBufferedBytes("secondary")
     fun getSecondaryDroppedFrames(): Long = secondaryNetworkDroppedFrames.get()
     fun getEncoderDroppedFrames(): Long = encoderDroppedFrames.get()
     fun getNetworkDroppedFrames(): Long = networkDroppedFrames.get()
@@ -489,8 +529,7 @@ class HardwareMediaPipeline(
                             val avccRec = FlvH264Helper.buildAvcDecoderConfigFromAnnexB(copy)
                             if (avccRec != null) {
                                 videoConfigBytes = avccRec
-                                rtmpSender?.updateVideoConfig(avccRec)
-                                secondaryRtmpSender?.updateVideoConfig(avccRec)
+                                namedSenders.values.forEach { it.updateVideoConfig(avccRec) }
                             }
                         } else {
                             encodedVideoFrames.incrementAndGet()
@@ -503,30 +542,37 @@ class HardwareMediaPipeline(
                                 lastBitrateSampleMs = now
                             }
 
+                            lastRawPtsUs = info.presentationTimeUs
                             val isKey = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
-                            // Crash-Safe 10-minute segment roll cleanly aligned on keyframes
-                            if (isKey && recordingActive.get() &&
+
+                            if (isKey && recordingActive.get() && !ptsRebaser.isPaused &&
                                 recordingFormat == RecordingFormat.SEGMENTED_MP4 &&
                                 now - segmentStartMs >= 600_000L
                             ) {
                                 rotateRecordingSegmentLocked()
                             }
 
-                            val dup = buf.duplicate()
-                            writeMuxerSample(isVideo = true, data = dup, info = info)
+                            val packetBytes = ByteArray(info.size)
+                            buf.get(packetBytes)
 
-                            if (streamActive.get() || secondaryStreamActive.get()) {
-                                val packetBytes = ByteArray(info.size)
-                                buf.position(info.offset)
-                                buf.get(packetBytes)
+                            if (recordingActive.get()) {
+                                writeMuxerSample(isVideo = true, isKey = isKey, rawBytes = packetBytes, info = info)
+                            }
+
+                            if (replayRingBuffer.enabled) {
+                                replayRingBuffer.pushSample(
+                                    isVideo = true,
+                                    isKey = isKey,
+                                    ptsUs = info.presentationTimeUs,
+                                    flags = info.flags,
+                                    payload = packetBytes
+                                )
+                            }
+
+                            if (namedSenders.isNotEmpty()) {
                                 val avccPayload = FlvH264Helper.annexBFrameToAvcc(packetBytes)
                                 val ptsMs = info.presentationTimeUs / 1000L
-                                if (streamActive.get()) {
-                                    rtmpSender?.enqueueVideo(avccPayload, ptsMs, isKey)
-                                }
-                                if (secondaryStreamActive.get()) {
-                                    secondaryRtmpSender?.enqueueVideo(avccPayload, ptsMs, isKey)
-                                }
+                                namedSenders.values.forEach { it.enqueueVideo(avccPayload, ptsMs, isKey) }
                             }
                         }
                     }
@@ -551,6 +597,9 @@ class HardwareMediaPipeline(
             muxerStarted = false
             currentRecordFile = nextFile
             segmentStartMs = System.currentTimeMillis()
+            ptsRebaser.reset()
+            lastMuxerVideoPtsUs = -1L
+            lastMuxerAudioPtsUs = -1L
             maybeStartMuxerLocked()
             repository.markActiveRecording(nextFile, segmentStartMs)
         }
@@ -591,8 +640,7 @@ class HardwareMediaPipeline(
                         val bytes = ByteArray(csd.remaining())
                         csd.duplicate().get(bytes)
                         audioConfigBytes = bytes
-                        rtmpSender?.updateAudioConfig(bytes)
-                        secondaryRtmpSender?.updateAudioConfig(bytes)
+                        namedSenders.values.forEach { it.updateAudioConfig(bytes) }
                     }
                 }
                 idx >= 0 -> {
@@ -604,21 +652,26 @@ class HardwareMediaPipeline(
                             val copy = ByteArray(info.size)
                             buf.get(copy)
                             audioConfigBytes = copy
-                            rtmpSender?.updateAudioConfig(copy)
-                            secondaryRtmpSender?.updateAudioConfig(copy)
+                            namedSenders.values.forEach { it.updateAudioConfig(copy) }
                         } else {
-                            writeMuxerSample(isVideo = false, data = buf.duplicate(), info = info)
-                            if (streamActive.get() || secondaryStreamActive.get()) {
-                                val aBytes = ByteArray(info.size)
-                                buf.position(info.offset)
-                                buf.get(aBytes)
+                            val aBytes = ByteArray(info.size)
+                            buf.get(aBytes)
+
+                            if (recordingActive.get()) {
+                                writeMuxerSample(isVideo = false, isKey = false, rawBytes = aBytes, info = info)
+                            }
+                            if (replayRingBuffer.enabled) {
+                                replayRingBuffer.pushSample(
+                                    isVideo = false,
+                                    isKey = false,
+                                    ptsUs = info.presentationTimeUs,
+                                    flags = info.flags,
+                                    payload = aBytes
+                                )
+                            }
+                            if (namedSenders.isNotEmpty()) {
                                 val ptsMs = info.presentationTimeUs / 1000L
-                                if (streamActive.get()) {
-                                    rtmpSender?.enqueueAudio(aBytes, ptsMs)
-                                }
-                                if (secondaryStreamActive.get()) {
-                                    secondaryRtmpSender?.enqueueAudio(aBytes, ptsMs)
-                                }
+                                namedSenders.values.forEach { it.enqueueAudio(aBytes, ptsMs) }
                             }
                         }
                     }
@@ -633,7 +686,6 @@ class HardwareMediaPipeline(
         if (muxerStarted) return
         val vFmt = currentVideoFormat ?: return
         val aFmt = currentAudioFormat
-        // Wait for audio format when AAC encoder is active so MP4 recordings always include audio!
         if (aFmt == null && audioEncoder != null) return
 
         muxerVideoTrack = m.addTrack(vFmt)
@@ -644,7 +696,7 @@ class HardwareMediaPipeline(
         muxerStarted = true
     }
 
-    private fun writeMuxerSample(isVideo: Boolean, data: ByteBuffer, info: MediaCodec.BufferInfo) {
+    private fun writeMuxerSample(isVideo: Boolean, isKey: Boolean, rawBytes: ByteArray, info: MediaCodec.BufferInfo) {
         if (!recordingActive.get()) return
         synchronized(muxerLock) {
             val m = muxer ?: return
@@ -654,9 +706,24 @@ class HardwareMediaPipeline(
             }
             val track = if (isVideo) muxerVideoTrack else muxerAudioTrack
             if (track < 0) return
+
+            var rebasedPts = ptsRebaser.filterAndRebase(isVideo, isKey, info.presentationTimeUs)
+            if (rebasedPts < 0L) return
+
+            if (isVideo) {
+                if (rebasedPts <= lastMuxerVideoPtsUs) rebasedPts = lastMuxerVideoPtsUs + 1L
+                lastMuxerVideoPtsUs = rebasedPts
+            } else {
+                if (rebasedPts <= lastMuxerAudioPtsUs) rebasedPts = lastMuxerAudioPtsUs + 1L
+                lastMuxerAudioPtsUs = rebasedPts
+            }
+
+            val rebasedInfo = MediaCodec.BufferInfo().apply {
+                set(0, rawBytes.size, rebasedPts, info.flags)
+            }
             runCatching {
-                m.writeSampleData(track, data, info)
-                recordBytesWritten.addAndGet(info.size.toLong())
+                m.writeSampleData(track, ByteBuffer.wrap(rawBytes), rebasedInfo)
+                recordBytesWritten.addAndGet(rawBytes.size.toLong())
             }.onFailure { err ->
                 onRecordingError("Recording write failed: ${err.message}")
                 stopRecording()
@@ -681,8 +748,7 @@ class HardwareMediaPipeline(
         }
         if (avcc.isNotEmpty()) {
             videoConfigBytes = avcc
-            rtmpSender?.updateVideoConfig(avcc)
-            secondaryRtmpSender?.updateVideoConfig(avcc)
+            namedSenders.values.forEach { it.updateVideoConfig(avcc) }
         }
     }
 
@@ -743,411 +809,99 @@ class HardwareMediaPipeline(
 }
 
 /**
- * Bounded-queue RTMP / RTMPS sender implementing RTMP C0/C1/C2 handshake,
- * Set Chunk Size (4096), connect/createStream/publish, and AVCC FLV-wrapped H.264/AAC chunks.
- * Never buffers unboundedly (Iron Rule R12): drops oldest non-config frames on slow uplink.
+ * Pure Kotlin H.264 Annex-B <-> FLV AVCC framing utilities.
  */
-class RtmpFlvSender(
-    private val baseUrl: String,
-    private val streamKey: String,
-    private val width: Int,
-    private val height: Int,
-    private val fps: Int,
-    private val videoBitrateKbps: Int,
-    private val audioBitrateKbps: Int,
-    private val onConnected: () -> Unit,
-    private val onFailure: (String) -> Unit,
-    private val onNetworkDrop: () -> Unit
-) {
-    private data class Packet(
-        val isVideo: Boolean,
-        val isConfig: Boolean,
-        val isKey: Boolean,
-        val timestampMs: Long,
-        val payload: ByteArray
-    )
+object FlvH264Helper {
 
-    private val queue = ArrayBlockingQueue<Packet>(120)
-    private val running = AtomicBoolean(false)
-    private val queuedBytes = AtomicLong(0L)
-    private val videoSeqSent = AtomicBoolean(false)
-    private val audioSeqSent = AtomicBoolean(false)
-    @Volatile private var pendingVideoSeq: ByteArray? = null
-    @Volatile private var pendingAudioSeq: ByteArray? = null
-    private var worker: Thread? = null
-    private var readerThread: Thread? = null
-    private var socket: Socket? = null
-    private val chunkSize = 4096
-
-    fun start(videoSeqHeader: ByteArray?, audioSeqHeader: ByteArray?) {
-        if (running.getAndSet(true)) return
-        pendingVideoSeq = videoSeqHeader
-        pendingAudioSeq = audioSeqHeader
-        worker = Thread({
-            runSession()
-        }, "MobileLabs-RTMP").apply { start() }
-    }
-
-    fun updateVideoConfig(avccConfig: ByteArray) {
-        if (avccConfig.isEmpty()) return
-        pendingVideoSeq = avccConfig
-    }
-
-    fun updateAudioConfig(ascConfig: ByteArray) {
-        if (ascConfig.isEmpty()) return
-        pendingAudioSeq = ascConfig
-    }
-
-    fun enqueueVideo(bytes: ByteArray, timestampMs: Long, isKey: Boolean) {
-        if (!running.get()) return
-        val pkt = Packet(isVideo = true, isConfig = false, isKey = isKey, timestampMs = timestampMs, payload = bytes)
-        enqueueBounded(pkt)
-    }
-
-    fun enqueueAudio(bytes: ByteArray, timestampMs: Long) {
-        if (!running.get()) return
-        val pkt = Packet(isVideo = false, isConfig = false, isKey = false, timestampMs = timestampMs, payload = bytes)
-        enqueueBounded(pkt)
-    }
-
-    fun queueDepth(): Int = queue.size
-    fun bufferedBytes(): Long = queuedBytes.get()
-
-    fun stop() {
-        running.set(false)
-        runCatching { socket?.close() }
-        socket = null
-        queue.clear()
-        queuedBytes.set(0L)
-        runCatching { worker?.join(500) }
-        runCatching { readerThread?.join(200) }
-        worker = null
-        readerThread = null
-    }
-
-    private fun enqueueBounded(pkt: Packet) {
-        while (queue.remainingCapacity() == 0) {
-            val dropped = queue.poll() ?: break
-            queuedBytes.addAndGet(-dropped.payload.size.toLong())
-            onNetworkDrop()
-        }
-        if (queue.offer(pkt)) {
-            queuedBytes.addAndGet(pkt.payload.size.toLong())
-        }
-    }
-
-    private fun runSession() {
-        try {
-            val parsed = parseRtmpUrl(baseUrl)
-            val sock = if (parsed.isTls) {
-                SSLSocketFactory.getDefault().createSocket()
+    fun splitAnnexBNalus(data: ByteArray): List<ByteArray> {
+        val result = ArrayList<ByteArray>(4)
+        var i = 0
+        val n = data.size
+        while (i < n) {
+            val scLen = startCodeLengthAt(data, i)
+            if (scLen > 0) {
+                val start = i + scLen
+                var end = start
+                while (end < n && startCodeLengthAt(data, end) == 0) {
+                    end++
+                }
+                if (end > start) {
+                    result += data.copyOfRange(start, end)
+                }
+                i = end
             } else {
-                Socket()
+                i++
             }
-            sock.connect(InetSocketAddress(parsed.host, parsed.port), 6000)
-            sock.soTimeout = 12_000
-            sock.tcpNoDelay = true
-            socket = sock
-
-            val input = DataInputStream(BufferedInputStream(sock.getInputStream()))
-            val output = DataOutputStream(BufferedOutputStream(sock.getOutputStream(), 16384))
-
-            // RTMP Simple Handshake (C0 + C1 -> S0 + S1 + S2 -> C2)
-            output.writeByte(0x03)
-            val c1 = ByteArray(1536)
-            output.write(c1)
-            output.flush()
-
-            val s0 = input.readByte().toInt()
-            if (s0 != 0x03) error("Unsupported RTMP server version $s0")
-            val s1 = ByteArray(1536)
-            input.readFully(s1)
-            val s2 = ByteArray(1536)
-            input.readFully(s2)
-            output.write(s1)
-            output.flush()
-
-            // Switch outgoing chunk size to 4096 bytes for low-overhead 60fps streaming
-            sendSetChunkSize(output, chunkSize)
-            sendConnectChunk(output, parsed.app, baseUrl)
-            sendCreateStreamChunk(output)
-            sendPublishChunk(output, streamKey)
-            output.flush()
-
-            // Drain incoming server WindowAck / Ping / PeerBW messages so TCP receive buffer never stalls
-            readerThread = Thread({
-                val drainBuf = ByteArray(1024)
-                while (running.get()) {
-                    val r = runCatching { input.read(drainBuf) }.getOrDefault(-1)
-                    if (r < 0) break
-                }
-            }, "MobileLabs-RTMP-Rx").apply { isDaemon = true; start() }
-
-            // Confirmed connected! Notify SessionController so LIVE badge activates honestly (R11)
-            onConnected()
-
-            sendMetadataChunk(output)
-            pendingVideoSeq?.let { seq ->
-                writeFlvVideoTag(output, seq, 0L, isKey = true, isSeqHeader = true)
-                videoSeqSent.set(true)
-            }
-            pendingAudioSeq?.let { seq ->
-                writeFlvAudioTag(output, seq, 0L, isSeqHeader = true)
-                audioSeqSent.set(true)
-            }
-            output.flush()
-
-            // Rebase timestamps against monotonic MediaCodec clock (NOT wall-clock!)
-            var firstMediaPtsMs = -1L
-            var hasSeenKeyframe = false
-            while (running.get()) {
-                if (!videoSeqSent.get()) {
-                    pendingVideoSeq?.let { seq ->
-                        writeFlvVideoTag(output, seq, 0L, isKey = true, isSeqHeader = true)
-                        videoSeqSent.set(true)
-                        output.flush()
-                    }
-                }
-                if (!audioSeqSent.get()) {
-                    pendingAudioSeq?.let { seq ->
-                        writeFlvAudioTag(output, seq, 0L, isSeqHeader = true)
-                        audioSeqSent.set(true)
-                        output.flush()
-                    }
-                }
-
-                val pkt = queue.poll()
-                if (pkt == null) {
-                    Thread.sleep(4)
-                    continue
-                }
-                queuedBytes.addAndGet(-pkt.payload.size.toLong())
-
-                // Wait until we have a video sequence header + first IDR keyframe before emitting video
-                if (pkt.isVideo && (!videoSeqSent.get() || (!hasSeenKeyframe && !pkt.isKey))) {
-                    continue
-                }
-                if (pkt.isVideo && pkt.isKey) {
-                    hasSeenKeyframe = true
-                }
-
-                if (firstMediaPtsMs < 0L) {
-                    firstMediaPtsMs = pkt.timestampMs
-                }
-                val relTs = (pkt.timestampMs - firstMediaPtsMs).coerceAtLeast(0L)
-                if (pkt.isVideo) {
-                    writeFlvVideoTag(output, pkt.payload, relTs, isKey = pkt.isKey, isSeqHeader = false)
-                } else if (audioSeqSent.get()) {
-                    writeFlvAudioTag(output, pkt.payload, relTs, isSeqHeader = false)
-                }
-                if (queue.isEmpty()) {
-                    output.flush()
-                }
-            }
-        } catch (t: Throwable) {
-            if (running.get()) {
-                onFailure("RTMP disconnected: ${t.message ?: "connection error"}")
-            }
-        } finally {
-            runCatching { socket?.close() }
-            socket = null
         }
+        return result
     }
 
-    private data class ParsedRtmp(val isTls: Boolean, val host: String, val port: Int, val app: String)
-
-    private fun parseRtmpUrl(url: String): ParsedRtmp {
-        val trimmed = url.trim()
-        val isTls = trimmed.startsWith("rtmps://", ignoreCase = true)
-        val withoutScheme = trimmed
-            .removePrefix("rtmps://")
-            .removePrefix("rtmp://")
-        val slashIdx = withoutScheme.indexOf('/')
-        val hostPort = if (slashIdx >= 0) withoutScheme.substring(0, slashIdx) else withoutScheme
-        val app = if (slashIdx >= 0) withoutScheme.substring(slashIdx + 1).ifBlank { "live" } else "live"
-        val colonIdx = hostPort.indexOf(':')
-        val host = if (colonIdx >= 0) hostPort.substring(0, colonIdx) else hostPort
-        val port = if (colonIdx >= 0) {
-            hostPort.substring(colonIdx + 1).toIntOrNull() ?: if (isTls) 443 else 1935
+    fun buildAvcDecoderConfigRecord(sps: ByteArray, pps: ByteArray): ByteArray {
+        val cleanSps = stripStartCode(sps)
+        val cleanPps = stripStartCode(pps)
+        if (cleanSps.size < 4) return ByteArray(0)
+        val out = ByteArrayOutputStream(16 + cleanSps.size + cleanPps.size)
+        out.write(0x01)
+        out.write(cleanSps[1].toInt() and 0xFF)
+        out.write(cleanSps[2].toInt() and 0xFF)
+        out.write(cleanSps[3].toInt() and 0xFF)
+        out.write(0xFF)
+        out.write(0xE1)
+        out.write((cleanSps.size ushr 8) and 0xFF)
+        out.write(cleanSps.size and 0xFF)
+        out.write(cleanSps)
+        if (cleanPps.isNotEmpty()) {
+            out.write(0x01)
+            out.write((cleanPps.size ushr 8) and 0xFF)
+            out.write(cleanPps.size and 0xFF)
+            out.write(cleanPps)
         } else {
-            if (isTls) 443 else 1935
+            out.write(0x00)
         }
-        return ParsedRtmp(isTls, host, port, app)
+        return out.toByteArray()
     }
 
-    private fun sendSetChunkSize(out: DataOutputStream, size: Int) {
-        val payload = byteArrayOf(
-            ((size ushr 24) and 0x7F).toByte(),
-            ((size ushr 16) and 0xFF).toByte(),
-            ((size ushr 8) and 0xFF).toByte(),
-            (size and 0xFF).toByte()
-        )
-        writeRtmpChunk(out, csid = 2, msgTypeId = 1, streamId = 0, ts = 0, payload = payload, activeChunkSize = 128)
+    fun buildAvcDecoderConfigFromAnnexB(csd: ByteArray): ByteArray? {
+        val nalus = splitAnnexBNalus(csd)
+        val sps = nalus.firstOrNull { (it[0].toInt() and 0x1F) == 7 } ?: return null
+        val pps = nalus.firstOrNull { (it[0].toInt() and 0x1F) == 8 } ?: ByteArray(0)
+        val rec = buildAvcDecoderConfigRecord(sps, pps)
+        return rec.takeIf { it.isNotEmpty() }
     }
 
-    private fun sendConnectChunk(out: DataOutputStream, app: String, tcUrl: String) {
-        val amf = ByteArrayOutputStream()
-        writeAmfString(amf, "connect")
-        writeAmfNumber(amf, 1.0)
-        amf.write(0x03) // AMF0 Object
-        writeAmfProp(amf, "app", app)
-        writeAmfProp(amf, "type", "nonprivate")
-        writeAmfProp(amf, "tcUrl", tcUrl)
-        writeAmfObjectEnd(amf)
-        writeRtmpChunk(out, csid = 3, msgTypeId = 20, streamId = 0, ts = 0, payload = amf.toByteArray())
-    }
-
-    private fun sendCreateStreamChunk(out: DataOutputStream) {
-        val amf = ByteArrayOutputStream()
-        writeAmfString(amf, "createStream")
-        writeAmfNumber(amf, 2.0)
-        amf.write(0x05) // AMF0 Null
-        writeRtmpChunk(out, csid = 3, msgTypeId = 20, streamId = 0, ts = 0, payload = amf.toByteArray())
-    }
-
-    private fun sendPublishChunk(out: DataOutputStream, key: String) {
-        val amf = ByteArrayOutputStream()
-        writeAmfString(amf, "publish")
-        writeAmfNumber(amf, 3.0)
-        amf.write(0x05) // Null
-        writeAmfString(amf, key)
-        writeAmfString(amf, "live")
-        writeRtmpChunk(out, csid = 8, msgTypeId = 20, streamId = 1, ts = 0, payload = amf.toByteArray())
-    }
-
-    private fun sendMetadataChunk(out: DataOutputStream) {
-        val amf = ByteArrayOutputStream()
-        writeAmfString(amf, "@setDataFrame")
-        writeAmfString(amf, "onMetaData")
-        amf.write(0x08) // ECMA Array
-        val count = 8
-        amf.write((count ushr 24) and 0xFF)
-        amf.write((count ushr 16) and 0xFF)
-        amf.write((count ushr 8) and 0xFF)
-        amf.write(count and 0xFF)
-        writeAmfNumProp(amf, "width", width.toDouble())
-        writeAmfNumProp(amf, "height", height.toDouble())
-        writeAmfNumProp(amf, "framerate", fps.toDouble())
-        writeAmfNumProp(amf, "videocodecid", 7.0) // AVC
-        writeAmfNumProp(amf, "videodatarate", videoBitrateKbps.toDouble())
-        writeAmfNumProp(amf, "audiocodecid", 10.0) // AAC
-        writeAmfNumProp(amf, "audiodatarate", audioBitrateKbps.toDouble())
-        writeAmfProp(amf, "encoder", "Mobile Labs (libobs/MediaCodec)")
-        writeAmfObjectEnd(amf)
-        writeRtmpChunk(out, csid = 4, msgTypeId = 18, streamId = 1, ts = 0, payload = amf.toByteArray())
-    }
-
-    private fun writeFlvVideoTag(
-        out: DataOutputStream,
-        payload: ByteArray,
-        tsMs: Long,
-        isKey: Boolean,
-        isSeqHeader: Boolean
-    ) {
-        val body = ByteArray(5 + payload.size)
-        body[0] = if (isKey) 0x17 else 0x27
-        body[1] = if (isSeqHeader) 0x00 else 0x01
-        body[2] = 0x00
-        body[3] = 0x00
-        body[4] = 0x00
-        System.arraycopy(payload, 0, body, 5, payload.size)
-        writeRtmpChunk(out, csid = 6, msgTypeId = 9, streamId = 1, ts = tsMs, payload = body)
-    }
-
-    private fun writeFlvAudioTag(out: DataOutputStream, payload: ByteArray, tsMs: Long, isSeqHeader: Boolean) {
-        val body = ByteArray(2 + payload.size)
-        body[0] = 0xAF.toByte() // AAC 48kHz 16-bit stereo
-        body[1] = if (isSeqHeader) 0x00 else 0x01
-        System.arraycopy(payload, 0, body, 2, payload.size)
-        writeRtmpChunk(out, csid = 4, msgTypeId = 8, streamId = 1, ts = tsMs, payload = body)
-    }
-
-    private fun writeRtmpChunk(
-        out: DataOutputStream,
-        csid: Int,
-        msgTypeId: Int,
-        streamId: Int,
-        ts: Long,
-        payload: ByteArray,
-        activeChunkSize: Int = chunkSize
-    ) {
-        val extended = ts >= 0xFFFFFFL
-        val hdrTs = if (extended) 0xFFFFFFL else ts.coerceAtLeast(0L)
-        var offset = 0
-        var first = true
-        while (offset < payload.size) {
-            val take = minOf(activeChunkSize, payload.size - offset)
-            if (first) {
-                out.writeByte(csid and 0x3F) // fmt 0
-                out.writeByte(((hdrTs ushr 16) and 0xFF).toInt())
-                out.writeByte(((hdrTs ushr 8) and 0xFF).toInt())
-                out.writeByte((hdrTs and 0xFF).toInt())
-                out.writeByte((payload.size ushr 16) and 0xFF)
-                out.writeByte((payload.size ushr 8) and 0xFF)
-                out.writeByte(payload.size and 0xFF)
-                out.writeByte(msgTypeId)
-                // Message stream id little-endian
-                out.writeByte(streamId and 0xFF)
-                out.writeByte((streamId ushr 8) and 0xFF)
-                out.writeByte((streamId ushr 16) and 0xFF)
-                out.writeByte((streamId ushr 24) and 0xFF)
-                if (extended) {
-                    writeInt32BE(out, ts)
-                }
-                first = false
-            } else {
-                out.writeByte(0xC0 or (csid and 0x3F)) // fmt 3 continuation
-                if (extended) {
-                    writeInt32BE(out, ts)
-                }
-            }
-            out.write(payload, offset, take)
-            offset += take
+    fun annexBFrameToAvcc(payload: ByteArray): ByteArray {
+        val nalus = splitAnnexBNalus(payload)
+        if (nalus.isEmpty()) return payload
+        val out = ByteArrayOutputStream(payload.size + 16)
+        for (nalu in nalus) {
+            val nalType = nalu[0].toInt() and 0x1F
+            if (nalType == 9 || nalType == 7 || nalType == 8) continue
+            val len = nalu.size
+            out.write((len ushr 24) and 0xFF)
+            out.write((len ushr 16) and 0xFF)
+            out.write((len ushr 8) and 0xFF)
+            out.write(len and 0xFF)
+            out.write(nalu)
         }
+        return if (out.size() > 0) out.toByteArray() else payload
     }
 
-    private fun writeInt32BE(out: DataOutputStream, value: Long) {
-        out.writeByte(((value ushr 24) and 0xFF).toInt())
-        out.writeByte(((value ushr 16) and 0xFF).toInt())
-        out.writeByte(((value ushr 8) and 0xFF).toInt())
-        out.writeByte((value and 0xFF).toInt())
+    private fun stripStartCode(bytes: ByteArray): ByteArray {
+        val sc = startCodeLengthAt(bytes, 0)
+        return if (sc > 0 && sc < bytes.size) bytes.copyOfRange(sc, bytes.size) else bytes
     }
 
-    private fun writeAmfString(out: ByteArrayOutputStream, s: String) {
-        val b = s.toByteArray(Charsets.UTF_8)
-        out.write(0x02)
-        out.write((b.size ushr 8) and 0xFF)
-        out.write(b.size and 0xFF)
-        out.write(b)
-    }
-
-    private fun writeAmfProp(out: ByteArrayOutputStream, key: String, value: String) {
-        val kb = key.toByteArray(Charsets.UTF_8)
-        out.write((kb.size ushr 8) and 0xFF)
-        out.write(kb.size and 0xFF)
-        out.write(kb)
-        writeAmfString(out, value)
-    }
-
-    private fun writeAmfNumProp(out: ByteArrayOutputStream, key: String, value: Double) {
-        val kb = key.toByteArray(Charsets.UTF_8)
-        out.write((kb.size ushr 8) and 0xFF)
-        out.write(kb.size and 0xFF)
-        out.write(kb)
-        writeAmfNumber(out, value)
-    }
-
-    private fun writeAmfNumber(out: ByteArrayOutputStream, value: Double) {
-        out.write(0x00)
-        val bits = java.lang.Double.doubleToRawLongBits(value)
-        for (shift in 56 downTo 0 step 8) {
-            out.write(((bits ushr shift) and 0xFF).toInt())
+    private fun startCodeLengthAt(data: ByteArray, index: Int): Int {
+        if (index + 3 <= data.size &&
+            data[index].toInt() == 0 &&
+            data[index + 1].toInt() == 0
+        ) {
+            if (data[index + 2].toInt() == 1) return 3
+            if (index + 4 <= data.size &&
+                data[index + 2].toInt() == 0 &&
+                data[index + 3].toInt() == 1
+            ) return 4
         }
-    }
-
-    private fun writeAmfObjectEnd(out: ByteArrayOutputStream) {
-        out.write(0x00)
-        out.write(0x00)
-        out.write(0x09)
+        return 0
     }
 }

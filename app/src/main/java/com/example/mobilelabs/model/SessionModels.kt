@@ -22,6 +22,7 @@ enum class SessionPhase(val displayLabel: String) {
 enum class RecordingPhase(val displayLabel: String) {
     IDLE("IDLE"),
     RECORDING("REC"),
+    PAUSED("PAUSED"),
     FINALIZING("FINALIZING"),
     ERROR("REC ERROR")
 }
@@ -46,15 +47,23 @@ enum class TransitionType(val label: String) {
     FADE_TO_COLOR("Fade Color")
 }
 
-enum class SourceType(val label: String, val isVisual: Boolean) {
-    SCREEN_CAPTURE("Screen Capture", true),
-    CAMERA_2("Camera (Camera2)", true),
-    IMAGE_SOURCE("Image", true),
-    MEDIA_SOURCE("Media (Video/Audio)", true),
-    TEXT_SOURCE("Text (FreeType/GPU)", true),
-    COLOR_SOURCE("Color Source", true),
-    MIC_AUDIO("Mic/Aux", false),
-    SYSTEM_AUDIO("System / Game Audio", false)
+enum class SourceType(val label: String, val isVisual: Boolean, val category: String = "Core") {
+    SCREEN_CAPTURE("Screen Capture", true, "Capture & Camera"),
+    SCREEN_REGION("Cropped Screen Region", true, "Capture & Camera"),
+    CAMERA_2("Camera (Camera2)", true, "Capture & Camera"),
+    IMAGE_SOURCE("Image", true, "Media & Graphics"),
+    GIF_STICKER("Animated GIF / Sticker", true, "Media & Graphics"),
+    MEDIA_SOURCE("Media (Video/Audio)", true, "Media & Graphics"),
+    BROWSER_SOURCE("Browser / Alert URL", true, "Widgets & Chat"),
+    CHAT_OVERLAY("Live Chat Box Overlay", true, "Widgets & Chat"),
+    TEXT_SOURCE("Text (FreeType/GPU)", true, "Media & Graphics"),
+    TIMER_SOURCE("Timer / Stopwatch", true, "Widgets & Chat"),
+    SCOREBOARD_SOURCE("Scoreboard Counter", true, "Widgets & Chat"),
+    DRAWING_LAYER("Screen Drawing / Ink Layer", true, "Widgets & Chat"),
+    COLOR_SOURCE("Color Source", true, "Media & Graphics"),
+    SOUNDBOARD_SOURCE("Soundboard / SFX Pads", false, "Audio & SFX"),
+    MIC_AUDIO("Mic/Aux", false, "Audio & SFX"),
+    SYSTEM_AUDIO("System / Game Audio", false, "Audio & SFX")
 }
 
 enum class PreviewTool(val label: String) {
@@ -256,6 +265,10 @@ data class SourceModel(
     val locked: Boolean = false,
     val erroredReason: String? = null,
     val useFrontCamera: Boolean = true,
+    val facecamShape: FacecamShape = FacecamShape.RECTANGLE,
+    val borderWidthPx: Float = 0f,
+    val borderColorArgb: Long = 0xFFCC1B1BL,
+    val mirrorHorizontal: Boolean = false,
     val mediaPathOrUri: String? = null,
     val mediaLoop: Boolean = true,
     val mediaMuted: Boolean = false,
@@ -265,6 +278,24 @@ data class SourceModel(
     val textBgColorArgb: Long = 0x9916161AL,
     val textSizeSp: Float = 44f,
     val colorArgb: Long = 0xFF720000L,
+    val browserUrl: String = "https://streamlabs.com/widgets/alert-box/v3/demo",
+    val browserFpsCap: Int = 20,
+    val browserTransparentBg: Boolean = true,
+    val browserWidthPx: Int = 800,
+    val browserHeightPx: Int = 600,
+    val timerTargetSec: Int = 300,
+    val timerCountDown: Boolean = true,
+    val timerRunning: Boolean = false,
+    val timerStartedAtMs: Long = 0L,
+    val timerElapsedBeforeMs: Long = 0L,
+    val scoreHomeName: String = "P1",
+    val scoreAwayName: String = "P2",
+    val scoreHome: Int = 0,
+    val scoreAway: Int = 0,
+    val drawingBrushColorArgb: Long = 0xFFFF3B30L,
+    val drawingBrushSizePx: Float = 10f,
+    val chatOverlayOpacity: Float = 0.72f,
+    val chatOverlayMaxMessages: Int = 7,
     val transform: SourceTransform = SourceTransform(),
     val videoFilters: VideoFilterConfig = VideoFilterConfig()
 )
@@ -470,7 +501,29 @@ data class MobileLabsUiState(
     val incompleteRecordings: List<IncompleteRecording> = emptyList(),
     val recentRecordings: List<PublishedRecording> = emptyList(),
     val eventLog: List<String> = emptyList(),
-    val lastDiagnosticsExportPath: String? = null
+    val lastDiagnosticsExportPath: String? = null,
+    val youtubeConnection: PlatformConnectionState = PlatformConnectionState(StreamingPlatform.YOUTUBE),
+    val twitchConnection: PlatformConnectionState = PlatformConnectionState(StreamingPlatform.TWITCH),
+    val chatMessages: List<PlatformChatMessage> = emptyList(),
+    val chatDrawerOpen: Boolean = false,
+    val twitchCategories: List<TwitchCategoryItem> = emptyList(),
+    val replayBuffer: ReplayBufferState = ReplayBufferState(),
+    val soundboardPads: List<SoundboardPad> = defaultSoundboardPads(),
+    val drawingModeActive: Boolean = false,
+    val drawingColorArgb: Long = 0xFFFF3B30L,
+    val drawingBrushWidthFraction: Float = 0.008f,
+    val drawingStrokes: List<DrawingStroke> = emptyList(),
+    val pushToTalkHeld: Boolean = false,
+    val lastScreenshotPath: String? = null,
+    val customYoutubeClientIdSaved: Boolean = false,
+    val customTwitchClientIdSaved: Boolean = false
+)
+
+fun defaultSoundboardPads(): List<SoundboardPad> = listOf(
+    SoundboardPad(id = "sfx_horn", label = "Airhorn", builtInTone = "HORN"),
+    SoundboardPad(id = "sfx_chime", label = "Sub Chime", builtInTone = "CHIME"),
+    SoundboardPad(id = "sfx_rimshot", label = "Rimshot", builtInTone = "RIMSHOT"),
+    SoundboardPad(id = "sfx_applause", label = "Hype Boom", builtInTone = "BOOM")
 )
 
 fun defaultSceneCollection(): SceneCollection {

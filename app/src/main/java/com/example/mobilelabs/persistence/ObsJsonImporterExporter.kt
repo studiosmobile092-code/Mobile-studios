@@ -2,6 +2,7 @@ package com.example.mobilelabs.persistence
 
 import android.content.Context
 import androidx.core.net.toUri
+import com.example.mobilelabs.model.FacecamShape
 import com.example.mobilelabs.model.LutPreset
 import com.example.mobilelabs.model.ScaleFilterType
 import com.example.mobilelabs.model.SceneCollection
@@ -226,11 +227,22 @@ object ObsJsonImporterExporter {
     private fun encodeLeafObsSource(src: SourceModel): JSONObject {
         val settings = JSONObject().apply {
             when (src.type) {
-                SourceType.IMAGE_SOURCE -> put("file", src.mediaPathOrUri.orEmpty())
+                SourceType.IMAGE_SOURCE, SourceType.GIF_STICKER -> put("file", src.mediaPathOrUri.orEmpty())
                 SourceType.MEDIA_SOURCE -> {
                     put("local_file", src.mediaPathOrUri.orEmpty())
                     put("looping", src.mediaLoop)
                     put("muted", src.mediaMuted)
+                }
+                SourceType.BROWSER_SOURCE -> {
+                    put("url", src.browserUrl)
+                    put("fps", src.browserFpsCap)
+                    put("width", src.browserWidthPx)
+                    put("height", src.browserHeightPx)
+                    put("transparent_bg", src.browserTransparentBg)
+                }
+                SourceType.CHAT_OVERLAY -> {
+                    put("opacity", src.chatOverlayOpacity.toDouble())
+                    put("max_messages", src.chatOverlayMaxMessages)
                 }
                 SourceType.TEXT_SOURCE -> {
                     put("text", src.textContent)
@@ -238,8 +250,28 @@ object ObsJsonImporterExporter {
                     put("bk_color", src.textBgColorArgb)
                     put("font", JSONObject().put("size", src.textSizeSp.toInt()))
                 }
+                SourceType.TIMER_SOURCE -> {
+                    put("target_sec", src.timerTargetSec)
+                    put("countdown", src.timerCountDown)
+                }
+                SourceType.SCOREBOARD_SOURCE -> {
+                    put("home_name", src.scoreHomeName)
+                    put("away_name", src.scoreAwayName)
+                    put("home_score", src.scoreHome)
+                    put("away_score", src.scoreAway)
+                }
+                SourceType.DRAWING_LAYER -> {
+                    put("brush_color", src.drawingBrushColorArgb)
+                    put("brush_size", src.drawingBrushSizePx.toDouble())
+                }
                 SourceType.COLOR_SOURCE -> put("color", src.colorArgb)
-                SourceType.CAMERA_2 -> put("front_camera", src.useFrontCamera)
+                SourceType.CAMERA_2 -> {
+                    put("front_camera", src.useFrontCamera)
+                    put("facecam_shape", src.facecamShape.name)
+                    put("border_width", src.borderWidthPx.toDouble())
+                    put("border_color", src.borderColorArgb)
+                    put("mirror_horizontal", src.mirrorHorizontal)
+                }
                 else -> Unit
             }
         }
@@ -344,19 +376,22 @@ object ObsJsonImporterExporter {
         )
 
         val rawPath = when (mappedType) {
-            SourceType.IMAGE_SOURCE -> settings.optString("file", "").ifBlank { null }
+            SourceType.IMAGE_SOURCE, SourceType.GIF_STICKER -> settings.optString("file", "").ifBlank { null }
             SourceType.MEDIA_SOURCE -> settings.optString("local_file", "").ifBlank { null }
             else -> null
         }
 
-        val assetErr = if ((mappedType == SourceType.IMAGE_SOURCE || mappedType == SourceType.MEDIA_SOURCE) && rawPath != null) {
+        val needsMedia = mappedType == SourceType.IMAGE_SOURCE ||
+            mappedType == SourceType.MEDIA_SOURCE ||
+            mappedType == SourceType.GIF_STICKER
+        val assetErr = if (needsMedia && rawPath != null) {
             if (isAssetAccessible(context, rawPath)) null
             else {
                 val shortName = rawPath.substringAfterLast('/')
                 missingAssets += shortName
                 "Missing asset: $shortName"
             }
-        } else if (mappedType == SourceType.IMAGE_SOURCE || mappedType == SourceType.MEDIA_SOURCE) {
+        } else if (needsMedia) {
             missingAssets += fallbackName
             "Missing media path"
         } else null
@@ -371,6 +406,12 @@ object ObsJsonImporterExporter {
             locked = item.optBoolean("locked", false),
             erroredReason = assetErr,
             useFrontCamera = settings.optBoolean("front_camera", true),
+            facecamShape = runCatching {
+                FacecamShape.valueOf(settings.optString("facecam_shape", FacecamShape.RECTANGLE.name))
+            }.getOrDefault(FacecamShape.RECTANGLE),
+            borderWidthPx = settings.optDouble("border_width", 0.0).toFloat().coerceIn(0f, 24f),
+            borderColorArgb = settings.optLong("border_color", 0xFFCC1B1BL),
+            mirrorHorizontal = settings.optBoolean("mirror_horizontal", false),
             mediaPathOrUri = rawPath,
             mediaLoop = settings.optBoolean("looping", true),
             mediaMuted = settings.optBoolean("muted", false),
@@ -379,6 +420,21 @@ object ObsJsonImporterExporter {
             textBgColorArgb = settings.optLong("bk_color", 0x9916161AL),
             textSizeSp = (settings.optJSONObject("font")?.optDouble("size", 44.0) ?: 44.0).toFloat().coerceIn(14f, 140f),
             colorArgb = settings.optLong("color", 0xFF720000L),
+            browserUrl = settings.optString("url", "https://streamlabs.com/widgets/alert-box/v3/demo").take(1024),
+            browserFpsCap = settings.optInt("fps", 20).coerceIn(5, 30),
+            browserTransparentBg = settings.optBoolean("transparent_bg", true),
+            browserWidthPx = settings.optInt("width", 800).coerceIn(160, 1920),
+            browserHeightPx = settings.optInt("height", 600).coerceIn(120, 1080),
+            timerTargetSec = settings.optInt("target_sec", 300).coerceIn(5, 86400),
+            timerCountDown = settings.optBoolean("countdown", true),
+            scoreHomeName = settings.optString("home_name", "P1").take(24),
+            scoreAwayName = settings.optString("away_name", "P2").take(24),
+            scoreHome = settings.optInt("home_score", 0),
+            scoreAway = settings.optInt("away_score", 0),
+            drawingBrushColorArgb = settings.optLong("brush_color", 0xFFFF3B30L),
+            drawingBrushSizePx = settings.optDouble("brush_size", 10.0).toFloat().coerceIn(2f, 40f),
+            chatOverlayOpacity = settings.optDouble("opacity", 0.72).toFloat().coerceIn(0.1f, 1f),
+            chatOverlayMaxMessages = settings.optInt("max_messages", 7).coerceIn(2, 15),
             transform = transform,
             videoFilters = filters
         )
@@ -443,30 +499,42 @@ object ObsJsonImporterExporter {
 
     private fun toObsSourceId(type: SourceType): String = when (type) {
         SourceType.SCREEN_CAPTURE -> "screen_capture"
+        SourceType.SCREEN_REGION -> "mobilelabs_screen_region"
         SourceType.CAMERA_2 -> "android_camera2"
         SourceType.IMAGE_SOURCE -> "image_source"
+        SourceType.GIF_STICKER -> "mobilelabs_gif_sticker"
         SourceType.MEDIA_SOURCE -> "ffmpeg_source"
+        SourceType.BROWSER_SOURCE -> "browser_source"
+        SourceType.CHAT_OVERLAY -> "mobilelabs_chat_overlay"
         SourceType.TEXT_SOURCE -> "text_ft2_source_v2"
+        SourceType.TIMER_SOURCE -> "mobilelabs_timer"
+        SourceType.SCOREBOARD_SOURCE -> "mobilelabs_scoreboard"
+        SourceType.DRAWING_LAYER -> "mobilelabs_drawing"
         SourceType.COLOR_SOURCE -> "color_source_v2"
+        SourceType.SOUNDBOARD_SOURCE -> "mobilelabs_soundboard"
         SourceType.MIC_AUDIO -> "wasapi_input_capture"
         SourceType.SYSTEM_AUDIO -> "wasapi_output_capture"
     }
 
     private fun fromObsSourceId(obsId: String, warnings: MutableList<String>): SourceType = when {
+        obsId == "mobilelabs_screen_region" -> SourceType.SCREEN_REGION
         obsId in setOf("screen_capture", "monitor_capture", "display_capture", "xshm_input", "game_capture") ->
             SourceType.SCREEN_CAPTURE
         obsId in setOf("android_camera2", "dshow_input", "v4l2_input", "av_capture_input") ->
             SourceType.CAMERA_2
+        obsId == "mobilelabs_gif_sticker" -> SourceType.GIF_STICKER
         obsId == "image_source" -> SourceType.IMAGE_SOURCE
         obsId in setOf("ffmpeg_source", "vlc_source") -> SourceType.MEDIA_SOURCE
+        obsId == "browser_source" -> SourceType.BROWSER_SOURCE
+        obsId == "mobilelabs_chat_overlay" -> SourceType.CHAT_OVERLAY
+        obsId == "mobilelabs_timer" -> SourceType.TIMER_SOURCE
+        obsId == "mobilelabs_scoreboard" -> SourceType.SCOREBOARD_SOURCE
+        obsId == "mobilelabs_drawing" -> SourceType.DRAWING_LAYER
+        obsId == "mobilelabs_soundboard" -> SourceType.SOUNDBOARD_SOURCE
         obsId.startsWith("text_") -> SourceType.TEXT_SOURCE
         obsId.startsWith("color_source") -> SourceType.COLOR_SOURCE
         obsId.contains("input_capture") -> SourceType.MIC_AUDIO
         obsId.contains("output_capture") -> SourceType.SYSTEM_AUDIO
-        obsId == "browser_source" -> {
-            warnings += "OBS browser_source mapped to Text placeholder (Browser source deferred in Phase 2)"
-            SourceType.TEXT_SOURCE
-        }
         else -> {
             warnings += "Unknown OBS source '$obsId' mapped to Color placeholder"
             SourceType.COLOR_SOURCE

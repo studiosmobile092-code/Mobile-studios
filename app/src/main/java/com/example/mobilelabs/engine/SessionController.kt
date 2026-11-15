@@ -24,26 +24,31 @@ import com.example.mobilelabs.media.AudioCaptureMixer
 import com.example.mobilelabs.media.Camera2SourceController
 import com.example.mobilelabs.media.GlZeroCopyCompositor
 import com.example.mobilelabs.media.HardwareMediaPipeline
+import com.example.mobilelabs.media.OffscreenBrowserSourceController
 import com.example.mobilelabs.model.AppProfile
 import com.example.mobilelabs.model.AudioChannelState
 import com.example.mobilelabs.model.AudioFilterConfig
 import com.example.mobilelabs.model.AutoTuneResult
 import com.example.mobilelabs.model.BenchmarkRecord
 import com.example.mobilelabs.model.DockPanelId
+import com.example.mobilelabs.model.DrawingStroke
 import com.example.mobilelabs.model.DualDestinationState
 import com.example.mobilelabs.model.GamingScenePreset
 import com.example.mobilelabs.model.MobileLabsUiState
 import com.example.mobilelabs.model.PresetId
 import com.example.mobilelabs.model.PreviewTool
 import com.example.mobilelabs.model.RecordingPhase
+import com.example.mobilelabs.model.ReplayBufferState
 import com.example.mobilelabs.model.RtmpServicePreset
 import com.example.mobilelabs.model.SceneCollection
 import com.example.mobilelabs.model.SceneModel
 import com.example.mobilelabs.model.ScreenFitMode
 import com.example.mobilelabs.model.SessionPhase
+import com.example.mobilelabs.model.SoundboardPad
 import com.example.mobilelabs.model.SourceModel
 import com.example.mobilelabs.model.SourceTransform
 import com.example.mobilelabs.model.SourceType
+import com.example.mobilelabs.model.StreamingPlatform
 import com.example.mobilelabs.model.ThermalSummary
 import com.example.mobilelabs.model.TransitionType
 import com.example.mobilelabs.model.VideoConfig
@@ -74,9 +79,10 @@ import javax.net.ssl.SSLSocketFactory
 
 /**
  * Single owner of state for Mobile Labs (Iron Rule R10).
- * Phase 2: coordinates libobs JNI bridge, multi-layer GLES3 compositor, GPU video filters,
+ * Coordinates libobs JNI bridge, multi-layer GLES3 compositor, GPU video filters,
  * zero-allocation Audio DSP chain, Studio Mode + 5 transitions, touch canvas editing,
- * profiles/collections, OBS JSON import/export, and thermal/memory telemetry.
+ * 1-click YouTube & Twitch OAuth/multi-stream/chat, Instant Replay Buffer, Pause/Resume recording,
+ * Soundboard/SFX, Drawing/Ink, Timer/Scoreboard widgets, profiles/collections, and thermal telemetry.
  */
 class SessionController(private val context: Context) {
 
@@ -91,10 +97,20 @@ class SessionController(private val context: Context) {
     private val obsBridge = ObsEngineBridge(context)
     private val diagnosticsExporter = DiagnosticsExporter(context)
     private val compositor = GlZeroCopyCompositor(context)
+    private val browserController = OffscreenBrowserSourceController(context)
     private val adaptiveEngine = AdaptiveQualityEngine()
 
     private val _uiState = MutableStateFlow(MobileLabsUiState())
     val uiState: StateFlow<MobileLabsUiState> = _uiState.asStateFlow()
+
+    private val platformCoordinator = PlatformConnectionCoordinator(
+        context = context,
+        secretStore = secretStore,
+        scope = scope,
+        uiState = _uiState,
+        onChatUpdated = { pushDynamicOverlaysToCompositor() },
+        logEvent = ::logEvent
+    )
 
     private var pipeline: HardwareMediaPipeline? = null
     private var audioMixer: AudioCaptureMixer? = null
@@ -104,6 +120,10 @@ class SessionController(private val context: Context) {
     private var reconnectJob: Job? = null
     private var streamStartedAtMs = 0L
     private var recordStartedAtMs = 0L
+    private var recordTotalPausedMs = 0L
+    private var recordPausedAtMs = 0L
+    private var chatVersionCounter = 0L
+    private var drawingVersionCounter = 0L
     private var reconnectCount = 0
     private var lastNetworkDropSeen = 0L
     private var cleanNetworkSeconds = 0
@@ -181,6 +201,11 @@ class SessionController(private val context: Context) {
                 lastCrashSummary = lastCrash,
                 benchmarkRecords = loadedSettings.benchmarkRecords,
                 dualDestination = cur.dualDestination.copy(enabled = loadedSettings.dualDestinationEnabled),
+                replayBuffer = ReplayBufferState(
+                    enabled = loadedSettings.replayBufferEnabled,
+                    durationSec = loadedSettings.replayDurationSec
+                ),
+                soundboardPads = loadedSettings.soundboardPads,
                 telemetry = cur.telemetry.copy(
                     outputWidth = loadedSettings.videoConfig.outputWidth,
                     outputHeight = loadedSettings.videoConfig.outputHeight,
@@ -189,9 +214,12 @@ class SessionController(private val context: Context) {
             )
         }
 
+        compositor.setBrowserController(browserController)
+        compositor.setMediaAudioCallback { pcm, count -> audioMixer?.pushMediaAudioPcm(pcm, count) }
         syncCompositorScenes()
         refreshPermissionStates()
         registerSystemMonitors()
+        platformCoordinator.hydrateSavedConnections()
 
         scope.launch(Dispatchers.IO) {
             val savedUrl = runCatching { secretStore.loadServerUrl() }.getOrDefault("")
@@ -337,12 +365,13 @@ class SessionController(private val context: Context) {
         )
         pipeline = pipe
         pipe.customRecordingFolderUri = _uiState.value.customRecordingFolderUri
+        val st = _uiState.value
+        pipe.configureReplayBuffer(st.replayBuffer.enabled, st.replayBuffer.durationSec)
         pipe.startEncoders(cfg)
         dynamicTargetBitrateKbps = cfg.videoBitrateKbps
         lastNetworkDropSeen = 0L
         cleanNetworkSeconds = 0
 
-        val st = _uiState.value
         val mixer = AudioCaptureMixer(context) { pcm, count, ptsUs ->
             pipe.pushAudioPcm(pcm, count, ptsUs)
         }.apply {
@@ -361,6 +390,7 @@ class SessionController(private val context: Context) {
                 micFilters = mCh.filters
             }
             masterMuted = st.masterMuted
+            pushToTalkHeld = st.pushToTalkHeld
         }
         audioMixer = mixer
         mixer.start(mediaProjection, st.hasMicPermission)
@@ -369,6 +399,11 @@ class SessionController(private val context: Context) {
             logEvent("Camera2 warning: $camErr")
             markSourceErrored(SourceType.CAMERA_2, null, camErr)
         }
+
+        browserController.start()
+        compositor.setBrowserController(browserController)
+        compositor.setMediaAudioCallback { pcm, count -> mixer.pushMediaAudioPcm(pcm, count) }
+        pushDynamicOverlaysToCompositor()
 
         compositor.start(
             videoConfig = cfg,
@@ -402,29 +437,69 @@ class SessionController(private val context: Context) {
         scope.launch(Dispatchers.IO) {
             val url = secretStore.loadServerUrl().ifBlank { st.rtmpServerUrl }
             val key = secretStore.loadStreamKey()
-            if (url.isBlank() || key.isBlank()) {
+            val hasPrimaryRtmp = url.isNotBlank() && key.isNotBlank()
+            val hasPlatformMulti = (st.youtubeConnection.connected && st.youtubeConnection.enabledForMultiStream) ||
+                (st.twitchConnection.connected && st.twitchConnection.enabledForMultiStream)
+            val secUrl = if (st.dualDestination.enabled) {
+                secretStore.loadSecondaryServerUrl().ifBlank { st.dualDestination.serverUrl }
+            } else ""
+            val secKey = if (st.dualDestination.enabled) secretStore.loadSecondaryStreamKey() else ""
+            val hasDualRtmp = st.dualDestination.enabled && secUrl.isNotBlank() && secKey.isNotBlank()
+
+            if (!hasPrimaryRtmp && !hasPlatformMulti && !hasDualRtmp) {
                 _uiState.update {
                     it.copy(
-                        errorReason = "Enter RTMP URL and Stream Key in Settings first",
-                        statusMessage = "Missing RTMP URL or Stream Key"
+                        errorReason = "Connect YouTube/Twitch or enter RTMP URL + Key first",
+                        statusMessage = "No active stream destination configured"
                     )
                 }
                 return@launch
             }
+
             _uiState.update {
                 it.copy(
                     sessionPhase = SessionPhase.CONNECTING,
                     errorReason = null,
-                    statusMessage = "Connecting to RTMP server..."
+                    statusMessage = "Connecting to live stream destinations..."
                 )
             }
-            pipeline?.startStreaming(url, key, st.videoConfig)
 
-            // M3.4 Dual Destination (shares single HW H.264/AAC encode; failures isolated)
+            if (hasPrimaryRtmp) {
+                pipeline?.startStreaming(url, key, st.videoConfig)
+            }
+
+            // 1-Click Connected Platforms (YouTube Live + Twitch sharing single HW encode)
+            platformCoordinator.startEnabledPlatformStreams { slotId, ingestUrl, streamKey, onSlotConnected, onSlotError ->
+                pipeline?.startNamedStream(
+                    slotId = slotId,
+                    rtmpBaseUrl = ingestUrl,
+                    streamKey = streamKey,
+                    videoConfig = st.videoConfig,
+                    onConnected = {
+                        onSlotConnected()
+                        markSessionLiveFromAnyDestination(
+                            if (slotId == "youtube") "LIVE on YouTube" else "LIVE on Twitch"
+                        )
+                    },
+                    onError = { err ->
+                        onSlotError(err)
+                        val cur = _uiState.value
+                        val anyOtherAlive = (cur.hasStreamKeySaved && cur.rtmpServerUrl.isNotBlank()) ||
+                            cur.dualDestination.phase == SessionPhase.LIVE ||
+                            cur.youtubeConnection.outputPhase == SessionPhase.LIVE ||
+                            cur.youtubeConnection.outputPhase == SessionPhase.CONNECTING ||
+                            cur.twitchConnection.outputPhase == SessionPhase.LIVE ||
+                            cur.twitchConnection.outputPhase == SessionPhase.CONNECTING
+                        if (!anyOtherAlive && cur.sessionPhase != SessionPhase.ARMED) {
+                            handleStreamDisconnect(err)
+                        }
+                    }
+                )
+            }
+
+            // Dual Custom Destination (shares single HW H.264/AAC encode; failures isolated)
             if (st.dualDestination.enabled) {
-                val secUrl = secretStore.loadSecondaryServerUrl().ifBlank { st.dualDestination.serverUrl }
-                val secKey = secretStore.loadSecondaryStreamKey()
-                if (secUrl.isNotBlank() && secKey.isNotBlank()) {
+                if (hasDualRtmp) {
                     _uiState.update { cur ->
                         cur.copy(
                             dualDestination = cur.dualDestination.copy(
@@ -446,6 +521,7 @@ class SessionController(private val context: Context) {
                                     )
                                 )
                             }
+                            markSessionLiveFromAnyDestination("LIVE on Dual RTMP")
                             logEvent("Secondary RTMP destination LIVE")
                         },
                         onError = { err ->
@@ -474,11 +550,33 @@ class SessionController(private val context: Context) {
         }
     }
 
+    private fun markSessionLiveFromAnyDestination(summaryLabel: String) {
+        reconnectCount = 0
+        if (streamStartedAtMs == 0L) {
+            streamStartedAtMs = System.currentTimeMillis()
+        }
+        _uiState.update { cur ->
+            val liveTags = buildList {
+                if (cur.youtubeConnection.outputPhase == SessionPhase.LIVE) add("YouTube")
+                if (cur.twitchConnection.outputPhase == SessionPhase.LIVE) add("Twitch")
+                if (cur.dualDestination.phase == SessionPhase.LIVE) add("Dual")
+                if (cur.hasStreamKeySaved && cur.rtmpServerUrl.isNotBlank() && isEmpty()) add("RTMP")
+            }
+            cur.copy(
+                sessionPhase = SessionPhase.LIVE,
+                reconnectCountdownSec = 0,
+                errorReason = null,
+                statusMessage = if (liveTags.isNotEmpty()) "LIVE · ${liveTags.joinToString(" + ")}" else summaryLabel
+            )
+        }
+    }
+
     fun stopStreaming() {
         reconnectJob?.cancel()
         reconnectJob = null
-        pipeline?.stopStreaming()
-        pipeline?.stopSecondaryStreaming()
+        streamStartedAtMs = 0L
+        pipeline?.stopAllStreams()
+        platformCoordinator.onStreamingStopped()
         compositor.setHeavyFiltersSuspended(false)
         _uiState.update { cur ->
             val nextPhase = if (cur.sessionPhase == SessionPhase.IDLE) SessionPhase.IDLE else SessionPhase.ARMED
@@ -506,6 +604,8 @@ class SessionController(private val context: Context) {
         val startedFile = pipeline?.startRecording()
         if (startedFile != null) {
             recordStartedAtMs = System.currentTimeMillis()
+            recordTotalPausedMs = 0L
+            recordPausedAtMs = 0L
             _uiState.update {
                 it.copy(recordingPhase = RecordingPhase.RECORDING, statusMessage = "Recording ${startedFile.name}")
             }
@@ -513,8 +613,41 @@ class SessionController(private val context: Context) {
         }
     }
 
-    fun stopRecording() {
+    fun pauseRecording() {
         if (_uiState.value.recordingPhase != RecordingPhase.RECORDING) return
+        pipeline?.pauseRecording()
+        recordPausedAtMs = System.currentTimeMillis()
+        _uiState.update {
+            it.copy(recordingPhase = RecordingPhase.PAUSED, statusMessage = "Recording PAUSED · Tap Resume to continue")
+        }
+        logEvent("Recording paused")
+    }
+
+    fun resumeRecording() {
+        if (_uiState.value.recordingPhase != RecordingPhase.PAUSED) return
+        if (recordPausedAtMs > 0L) {
+            recordTotalPausedMs += (System.currentTimeMillis() - recordPausedAtMs).coerceAtLeast(0L)
+            recordPausedAtMs = 0L
+        }
+        pipeline?.resumeRecording()
+        _uiState.update {
+            it.copy(recordingPhase = RecordingPhase.RECORDING, statusMessage = "Recording RESUMED")
+        }
+        logEvent("Recording resumed (PTS rebased cleanly)")
+    }
+
+    fun togglePauseRecord() {
+        when (_uiState.value.recordingPhase) {
+            RecordingPhase.RECORDING -> pauseRecording()
+            RecordingPhase.PAUSED -> resumeRecording()
+            else -> Unit
+        }
+    }
+
+    fun stopRecording() {
+        val phase = _uiState.value.recordingPhase
+        if (phase != RecordingPhase.RECORDING && phase != RecordingPhase.PAUSED) return
+        recordPausedAtMs = 0L
         _uiState.update { it.copy(recordingPhase = RecordingPhase.FINALIZING) }
         scope.launch(Dispatchers.IO) { pipeline?.stopRecording() }
     }
@@ -529,12 +662,102 @@ class SessionController(private val context: Context) {
     }
 
     fun toggleRecordFromClient() {
-        if (_uiState.value.recordingPhase == RecordingPhase.RECORDING) stopRecording() else startRecording()
+        val phase = _uiState.value.recordingPhase
+        if (phase == RecordingPhase.RECORDING || phase == RecordingPhase.PAUSED) stopRecording() else startRecording()
+    }
+
+    fun setReplayBufferEnabled(enabled: Boolean, durationSec: Int = _uiState.value.replayBuffer.durationSec) {
+        val clamped = durationSec.coerceIn(10, 120)
+        pipeline?.configureReplayBuffer(enabled, clamped)
+        _uiState.update { cur ->
+            cur.copy(
+                replayBuffer = cur.replayBuffer.copy(
+                    enabled = enabled,
+                    durationSec = clamped,
+                    bufferedSeconds = if (enabled) cur.replayBuffer.bufferedSeconds else 0f,
+                    bufferedKb = if (enabled) cur.replayBuffer.bufferedKb else 0L
+                ),
+                statusMessage = if (enabled) "Instant Replay Buffer ON (${clamped}s ring)" else "Replay Buffer OFF"
+            )
+        }
+        persistCurrentSettings()
+        logEvent("Replay Buffer ${if (enabled) "enabled (${clamped}s)" else "disabled"}")
+    }
+
+    fun saveReplayClip() {
+        val pipe = pipeline
+        val rb = _uiState.value.replayBuffer
+        if (pipe == null || !rb.enabled) {
+            _uiState.update { it.copy(statusMessage = "Enable Replay Buffer while Armed to save instant clips") }
+            return
+        }
+        _uiState.update { it.copy(statusMessage = "Saving ${rb.durationSec}s Instant Replay clip...") }
+        scope.launch(Dispatchers.IO) {
+            val saved = pipe.saveReplayBufferClip()
+            scope.launch(Dispatchers.Main.immediate) {
+                if (saved != null) {
+                    _uiState.update { cur ->
+                        cur.copy(
+                            replayBuffer = cur.replayBuffer.copy(
+                                clipsSavedCount = cur.replayBuffer.clipsSavedCount + 1,
+                                lastSavedClipPath = saved.fileName
+                            ),
+                            recentRecordings = (listOf(saved) + cur.recentRecordings).take(20),
+                            statusMessage = "Instant Replay saved: ${saved.fileName} (${saved.durationSec}s)"
+                        )
+                    }
+                    logEvent("Saved Instant Replay: ${saved.fileName}")
+                } else {
+                    _uiState.update {
+                        it.copy(statusMessage = "Replay buffer needs >=1 keyframe before saving")
+                    }
+                }
+            }
+        }
+    }
+
+    fun captureCanvasScreenshot() {
+        val pipe = pipeline
+        if (_uiState.value.sessionPhase == SessionPhase.IDLE || pipe == null) {
+            _uiState.update { it.copy(statusMessage = "Arm Capture before snapping a canvas screenshot") }
+            return
+        }
+        compositor.captureScreenshot { bmp ->
+            if (bmp == null) {
+                scope.launch {
+                    _uiState.update { it.copy(statusMessage = "Screenshot capture timed out") }
+                }
+                return@captureScreenshot
+            }
+            scope.launch(Dispatchers.IO) {
+                val uri = pipe.publishBitmapScreenshot(bmp)
+                bmp.recycle()
+                scope.launch(Dispatchers.Main.immediate) {
+                    if (uri != null) {
+                        _uiState.update {
+                            it.copy(
+                                lastScreenshotPath = uri,
+                                statusMessage = "Canvas PNG saved to Pictures/Mobile Labs"
+                            )
+                        }
+                        logEvent("Canvas screenshot saved: $uri")
+                    } else {
+                        _uiState.update { it.copy(statusMessage = "Failed to save screenshot") }
+                    }
+                }
+            }
+        }
     }
 
     fun disarmSession() {
         reconnectJob?.cancel()
         reconnectJob = null
+        streamStartedAtMs = 0L
+        recordStartedAtMs = 0L
+        recordTotalPausedMs = 0L
+        recordPausedAtMs = 0L
+        platformCoordinator.onStreamingStopped()
+        browserController.releaseAll()
         cameraController?.stop()
         cameraController = null
         audioMixer?.stop()
@@ -550,6 +773,7 @@ class SessionController(private val context: Context) {
                 isPreviewActive = false,
                 reconnectCountdownSec = 0,
                 unlockLiveTouchOverride = false,
+                drawingModeActive = false,
                 statusMessage = "Disarmed · Tap Arm Capture to start"
             )
         }
@@ -565,11 +789,13 @@ class SessionController(private val context: Context) {
     }
 
     fun onScreenLocked() {
-        if (_uiState.value.recordingPhase == RecordingPhase.RECORDING) stopRecording()
+        val phase = _uiState.value.recordingPhase
+        if (phase == RecordingPhase.RECORDING || phase == RecordingPhase.PAUSED) stopRecording()
         logEvent("Device screen locked; recording finalized if active")
     }
 
     fun onCapturedContentResized(width: Int, height: Int) {
+        compositor.updateSourceDisplaySize(width, height)
         logEvent("Captured display resized to ${width}x$height")
     }
 
@@ -602,19 +828,34 @@ class SessionController(private val context: Context) {
     }
 
     fun updateVideoConfig(newConfig: VideoConfig) {
-        compositor.updateVideoConfig(newConfig)
-        obsBridge.reconfigureVideo(newConfig)
-        pipeline?.recordingFormat = newConfig.recordingFormat
-        dynamicTargetBitrateKbps = newConfig.videoBitrateKbps
-        pipeline?.updateLiveBitrate(newConfig.videoBitrateKbps)
+        val cur = _uiState.value
+        val sessionActive = cur.sessionPhase != SessionPhase.IDLE && cur.sessionPhase != SessionPhase.ERROR
+        // Lock encoder dimensions/fps/format while live or armed so MediaCodec isn't mismatched mid-stream
+        val safeConfig = if (sessionActive) {
+            newConfig.copy(
+                canvasWidth = cur.videoConfig.canvasWidth,
+                canvasHeight = cur.videoConfig.canvasHeight,
+                outputWidth = cur.videoConfig.outputWidth,
+                outputHeight = cur.videoConfig.outputHeight
+            )
+        } else newConfig
+
+        compositor.updateVideoConfig(safeConfig)
+        obsBridge.reconfigureVideo(safeConfig)
+        pipeline?.recordingFormat = safeConfig.recordingFormat
+        dynamicTargetBitrateKbps = safeConfig.videoBitrateKbps
+        pipeline?.updateLiveBitrate(safeConfig.videoBitrateKbps)
         _uiState.update {
             it.copy(
-                videoConfig = newConfig,
+                videoConfig = safeConfig,
                 telemetry = it.telemetry.copy(
-                    outputWidth = newConfig.outputWidth,
-                    outputHeight = newConfig.outputHeight,
-                    configuredFps = newConfig.fps
-                )
+                    outputWidth = safeConfig.outputWidth,
+                    outputHeight = safeConfig.outputHeight,
+                    configuredFps = safeConfig.fps
+                ),
+                statusMessage = if (sessionActive && (newConfig.outputWidth != cur.videoConfig.outputWidth || newConfig.canvasWidth != cur.videoConfig.canvasWidth)) {
+                    "Resolution locked while capture is active (bitrate & fit updated)"
+                } else it.statusMessage
             )
         }
         persistCurrentSettings()
@@ -1632,12 +1873,183 @@ class SessionController(private val context: Context) {
         syncActiveCameraSource()
     }
 
+    // 1-Click OAuth Platform Connections, Unified Live Chat, Pro Widgets, Drawing Ink, Soundboard, PTT
+    fun startPlatformOAuth(platform: StreamingPlatform) = platformCoordinator.startPlatformOAuth(platform)
+    fun handleOAuthRedirect(uri: Uri) = platformCoordinator.handleOAuthRedirect(uri)
+    fun disconnectPlatform(platform: StreamingPlatform) = platformCoordinator.disconnectPlatform(platform)
+    fun saveCustomClientId(platform: StreamingPlatform, clientId: String) =
+        platformCoordinator.saveCustomClientId(platform, clientId)
+    fun setPlatformMultiStreamEnabled(platform: StreamingPlatform, enabled: Boolean) =
+        platformCoordinator.setPlatformMultiStreamEnabled(platform, enabled)
+    fun searchTwitchCategories(query: String) = platformCoordinator.searchTwitchCategories(query)
+    fun updatePlatformBroadcastMeta(
+        platform: StreamingPlatform,
+        title: String,
+        categoryId: String,
+        categoryName: String,
+        privacyStatus: String
+    ) = platformCoordinator.updatePlatformBroadcastMeta(platform, title, categoryId, categoryName, privacyStatus)
+
+    fun toggleChatDrawer() {
+        _uiState.update { it.copy(chatDrawerOpen = !it.chatDrawerOpen) }
+    }
+
+    fun sendLiveChatMessage(text: String, targetPlatform: StreamingPlatform? = null) =
+        platformCoordinator.sendLiveChatMessage(text, targetPlatform)
+
+    fun clearChatMessages() {
+        _uiState.update { it.copy(chatMessages = emptyList()) }
+        pushDynamicOverlaysToCompositor()
+    }
+
+    fun reloadBrowserSource(sourceId: String) {
+        browserController.reloadSource(sourceId)
+    }
+
+    fun controlTimer(sourceId: String, action: String) {
+        val now = System.currentTimeMillis()
+        mutateEditableSource(sourceId) { src ->
+            when (action) {
+                "start" -> if (!src.timerRunning) {
+                    src.copy(timerRunning = true, timerStartedAtMs = now)
+                } else src
+                "pause" -> if (src.timerRunning) {
+                    val elapsed = src.timerElapsedBeforeMs + (now - src.timerStartedAtMs).coerceAtLeast(0L)
+                    src.copy(timerRunning = false, timerElapsedBeforeMs = elapsed)
+                } else src
+                "reset" -> src.copy(timerRunning = false, timerStartedAtMs = 0L, timerElapsedBeforeMs = 0L)
+                else -> src
+            }
+        }
+    }
+
+    fun adjustScoreboard(sourceId: String, isHome: Boolean, delta: Int) {
+        mutateEditableSource(sourceId) { src ->
+            if (isHome) {
+                src.copy(scoreHome = (src.scoreHome + delta).coerceAtLeast(0))
+            } else {
+                src.copy(scoreAway = (src.scoreAway + delta).coerceAtLeast(0))
+            }
+        }
+    }
+
+    fun resetScoreboard(sourceId: String) {
+        mutateEditableSource(sourceId) { src -> src.copy(scoreHome = 0, scoreAway = 0) }
+    }
+
+    fun setDrawingMode(active: Boolean) {
+        _uiState.update { it.copy(drawingModeActive = active) }
+        if (active) {
+            val st = _uiState.value
+            val scene = st.sceneCollection.scenes.firstOrNull { it.id == editableSceneId(st) }
+            if (scene != null && scene.sources.none { it.type == SourceType.DRAWING_LAYER }) {
+                addSourceToActiveScene(SourceType.DRAWING_LAYER)
+            }
+        }
+    }
+
+    fun setDrawingBrush(colorArgb: Long, widthFraction: Float) {
+        _uiState.update {
+            it.copy(
+                drawingColorArgb = colorArgb,
+                drawingBrushWidthFraction = widthFraction.coerceIn(0.002f, 0.03f)
+            )
+        }
+    }
+
+    fun addDrawingStroke(stroke: DrawingStroke) {
+        if (stroke.points.isEmpty()) return
+        _uiState.update { cur ->
+            val updated = (cur.drawingStrokes + stroke).takeLast(120)
+            cur.copy(drawingStrokes = updated)
+        }
+        pushDynamicOverlaysToCompositor()
+    }
+
+    fun undoLastDrawingStroke() {
+        _uiState.update { cur ->
+            cur.copy(drawingStrokes = cur.drawingStrokes.dropLast(1))
+        }
+        pushDynamicOverlaysToCompositor()
+    }
+
+    fun clearDrawingStrokes() {
+        _uiState.update { it.copy(drawingStrokes = emptyList()) }
+        pushDynamicOverlaysToCompositor()
+    }
+
+    fun triggerSoundboardPad(padId: String) {
+        val pad = _uiState.value.soundboardPads.firstOrNull { it.id == padId } ?: return
+        val mixer = audioMixer
+        if (mixer != null) {
+            mixer.triggerSoundboardPad(pad)
+            logEvent("SFX triggered: ${pad.label}")
+        } else {
+            _uiState.update { it.copy(statusMessage = "Arm Capture to route Soundboard SFX into stream audio") }
+        }
+    }
+
+    fun setSoundboardPadVolume(padId: String, volume: Float) {
+        val v = volume.coerceIn(0f, 1.5f)
+        _uiState.update { cur ->
+            cur.copy(soundboardPads = cur.soundboardPads.map { if (it.id == padId) it.copy(volume = v) else it })
+        }
+        persistCurrentSettings()
+    }
+
+    fun renameSoundboardPad(padId: String, newLabel: String) {
+        if (newLabel.isBlank()) return
+        _uiState.update { cur ->
+            cur.copy(soundboardPads = cur.soundboardPads.map { if (it.id == padId) it.copy(label = newLabel.trim()) else it })
+        }
+        persistCurrentSettings()
+    }
+
+    fun importSoundboardAudio(padId: String, uri: Uri) {
+        scope.launch(Dispatchers.IO) {
+            val (localPath, err) = repository.copySafMediaAsset(uri, "sfx")
+            scope.launch(Dispatchers.Main.immediate) {
+                if (localPath != null) {
+                    _uiState.update { cur ->
+                        cur.copy(
+                            soundboardPads = cur.soundboardPads.map {
+                                if (it.id == padId) it.copy(filePath = localPath, builtInTone = null) else it
+                            },
+                            statusMessage = "Assigned custom SFX clip to pad"
+                        )
+                    }
+                    persistCurrentSettings()
+                } else {
+                    _uiState.update { it.copy(statusMessage = err ?: "Failed to load audio clip") }
+                }
+            }
+        }
+    }
+
+    fun setPushToTalkHeld(held: Boolean) {
+        audioMixer?.pushToTalkHeld = held
+        _uiState.update { it.copy(pushToTalkHeld = held) }
+    }
+
+    private fun pushDynamicOverlaysToCompositor() {
+        val st = _uiState.value
+        chatVersionCounter++
+        drawingVersionCounter++
+        compositor.updateDynamicOverlays(
+            chatMessages = st.chatMessages,
+            chatVersion = chatVersionCounter,
+            drawingStrokes = st.drawingStrokes,
+            drawingVersion = drawingVersionCounter
+        )
+    }
+
     fun onSystemTrimMemory(level: Int) {
         logEvent("onTrimMemory level=$level")
     }
 
     fun shutdown() {
         telemetryJob?.cancel()
+        platformCoordinator.stopChatClients()
         disarmSession()
         obsBridge.shutdown()
         runCatching { powerManager.removeThermalStatusListener(thermalListener) }
@@ -1826,8 +2238,11 @@ class SessionController(private val context: Context) {
         val streamSec = if (cur.sessionPhase == SessionPhase.LIVE && streamStartedAtMs > 0L) {
             (System.currentTimeMillis() - streamStartedAtMs) / 1000L
         } else 0L
-        val recSec = if (cur.recordingPhase == RecordingPhase.RECORDING && recordStartedAtMs > 0L) {
-            (System.currentTimeMillis() - recordStartedAtMs) / 1000L
+        val recSec = if ((cur.recordingPhase == RecordingPhase.RECORDING || cur.recordingPhase == RecordingPhase.PAUSED) && recordStartedAtMs > 0L) {
+            val activePauseMs = if (cur.recordingPhase == RecordingPhase.PAUSED && recordPausedAtMs > 0L) {
+                System.currentTimeMillis() - recordPausedAtMs
+            } else 0L
+            ((System.currentTimeMillis() - recordStartedAtMs - recordTotalPausedMs - activePauseMs).coerceAtLeast(0L)) / 1000L
         } else 0L
 
         val pipe = pipeline
@@ -1900,12 +2315,11 @@ class SessionController(private val context: Context) {
             if (adaptiveOutcome.shouldEmergencyStopStream && cur.sessionPhase == SessionPhase.LIVE) {
                 logEvent("CRITICAL THERMAL (L5): Finalizing recording & stopping stream for safety")
                 stopStreaming()
-                if (cur.recordingPhase == RecordingPhase.RECORDING) {
+                if (cur.recordingPhase == RecordingPhase.RECORDING || cur.recordingPhase == RecordingPhase.PAUSED) {
                     stopRecording()
                 }
             }
         } else if (cur.sessionPhase == SessionPhase.LIVE && cur.videoConfig.dynamicBitrateEnabled && pipe != null) {
-            // Congestion-driven Dynamic Network Bitrate (step down fast on drops/backlog, recover smoothly)
             val ceilingBitrate = (cur.videoConfig.videoBitrateKbps * adaptiveOutcome.recommendedBitrateScale)
                 .toInt().coerceAtLeast(1500)
             val dropsDelta = snapshot.networkDroppedFrames - lastNetworkDropSeen
@@ -1936,12 +2350,24 @@ class SessionController(private val context: Context) {
             bufferedBytes = pipe?.getSecondaryBufferedBytes() ?: 0L,
             droppedFrames = pipe?.getSecondaryDroppedFrames() ?: 0L
         )
+        val replayStats = pipe?.replayRingBuffer?.stats()
+
+        platformCoordinator.updatePlatformTelemetry(
+            ytBuffered = pipe?.getNamedBufferedBytes("youtube") ?: 0L,
+            ytDropped = pipe?.getNamedDroppedFrames("youtube") ?: 0L,
+            twBuffered = pipe?.getNamedBufferedBytes("twitch") ?: 0L,
+            twDropped = pipe?.getNamedDroppedFrames("twitch") ?: 0L
+        )
 
         val updatedState = _uiState.value.copy(
             telemetry = snapshot,
             audioChannels = liveChannels,
             adaptiveQuality = adaptiveOutcome.state,
             dualDestination = updatedDual,
+            replayBuffer = _uiState.value.replayBuffer.copy(
+                bufferedSeconds = replayStats?.bufferedSeconds ?: 0f,
+                bufferedKb = replayStats?.bufferedKb ?: 0L
+            ),
             speakerMicEchoDetected = mixer?.isSpeakerMicFeedbackRisk() == true
         )
         _uiState.value = updatedState
@@ -1982,6 +2408,9 @@ class SessionController(private val context: Context) {
                 adaptiveQualityLocked = cur.adaptiveQuality.lockedByUser,
                 onboardingCompleted = cur.onboardingCompleted,
                 dualDestinationEnabled = cur.dualDestination.enabled,
+                replayBufferEnabled = cur.replayBuffer.enabled,
+                replayDurationSec = cur.replayBuffer.durationSec,
+                soundboardPads = cur.soundboardPads,
                 benchmarkRecords = cur.benchmarkRecords
             )
         )

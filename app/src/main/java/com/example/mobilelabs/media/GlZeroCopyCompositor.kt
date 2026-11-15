@@ -4,9 +4,11 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.SurfaceTexture
 import android.graphics.Typeface
+import android.net.Uri
 import android.opengl.EGL14
 import android.opengl.EGLConfig
 import android.opengl.EGLContext
@@ -24,7 +26,11 @@ import android.os.Process
 import android.os.SystemClock
 import android.view.Surface
 import androidx.core.graphics.createBitmap
+import com.example.mobilelabs.model.DrawingStroke
+import com.example.mobilelabs.model.FacecamShape
 import com.example.mobilelabs.model.LutPreset
+import com.example.mobilelabs.model.PlatformChatMessage
+import com.example.mobilelabs.model.ScaleFilterType
 import com.example.mobilelabs.model.SceneModel
 import com.example.mobilelabs.model.ScreenFitMode
 import com.example.mobilelabs.model.SourceModel
@@ -36,6 +42,7 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -46,16 +53,14 @@ import kotlin.math.min
 import kotlin.math.sin
 
 /**
- * Multi-layer GLES3/EGL zero-copy compositor (Phase 2: M2.1, M2.3, M2.4).
- *
- * Supports:
+ * Multi-layer GLES3/EGL zero-copy compositor supporting:
  * - Zero-copy VirtualDisplay OES, Camera2 OES, and MediaSourceDecoder OES surfaces
- * - Size-aware cached GL_TEXTURE_2D for Image & Text sources (bounded LRU, evicted on hide)
- * - Solid Color quads
- * - GPU-only VideoFilterConfig fragment shaders (Color Correction, Chroma Key, Sharpen, 4 LUTs)
- * - Studio Mode split preview (left = Preview, right = Program) while encoder ALWAYS gets Program
- * - 5 Transitions (Cut, Fade, Slide, Swipe, Fade-to-Color)
- * - Preview paused immediately on ON_STOP (Iron Rule R9)
+ * - All 16 SourceTypes (Screen Capture, Cropped Screen Region, Camera2 w/ Shape Masks & Borders,
+ *   Image/GIF Stickers, Video/Audio Media, Browser/Alert WebView, Live Chat Overlay, Timer,
+ *   Scoreboard, Screen Drawing Ink Layer, Text, Color)
+ * - GPU-only VideoFilterConfig fragment shaders (Color Correction, Chroma Key, Sharpen, 4 LUTs, Scale Filters)
+ * - Studio Mode split preview + 5 scene transitions
+ * - On-demand single-frame glReadPixels PNG/JPEG canvas screenshot capture
  */
 class GlZeroCopyCompositor(private val appContext: Context? = null) {
 
@@ -70,9 +75,10 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
     private data class CachedTexture(
         val texId: Int,
         val key: String,
-        val width: Int,
-        val height: Int,
-        var lastUsedFrame: Long
+        var width: Int,
+        var height: Int,
+        var lastUsedFrame: Long,
+        var version: Long = 0L
     )
 
     private data class ActiveTransition(
@@ -102,6 +108,10 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         val uTexelSize = GLES30.glGetUniformLocation(programId, "uTexelSize")
         val uLutMode = GLES30.glGetUniformLocation(programId, "uLutMode")
         val uLutIntensity = GLES30.glGetUniformLocation(programId, "uLutIntensity")
+        val uShapeMode = GLES30.glGetUniformLocation(programId, "uShapeMode")
+        val uBorderFrac = GLES30.glGetUniformLocation(programId, "uBorderFrac")
+        val uBorderColor = GLES30.glGetUniformLocation(programId, "uBorderColor")
+        val uPointFilter = GLES30.glGetUniformLocation(programId, "uPointFilter")
     }
 
     private var glThread: HandlerThread? = null
@@ -113,6 +123,10 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
     private var dummyPbuffer: EGLSurface? = null
     private var encoderEglSurface: EGLSurface? = null
     private var previewEglSurface: EGLSurface? = null
+    private var screenshotFbo = 0
+    private var screenshotTex = 0
+    private var screenshotW = 0
+    private var screenshotH = 0
 
     private var oesLocs: ShaderLocations? = null
     private var tex2dLocs: ShaderLocations? = null
@@ -134,6 +148,16 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
     private var activeMediaDecoder: MediaSourceDecoder? = null
     private var activeMediaSignature: String? = null
     private var onMediaErrorCallback: ((String, String) -> Unit)? = null
+    private var onMediaAudioCallback: ((ShortArray, Int) -> Unit)? = null
+
+    private var browserController: OffscreenBrowserSourceController? = null
+    private val gifHandles = ConcurrentHashMap<String, DynamicSourceRenderer.AnimatedStickerHandle>()
+
+    private val chatMessagesRef = AtomicReference<List<PlatformChatMessage>>(emptyList())
+    private val chatVersionRef = AtomicLong(0L)
+    private val drawingStrokesRef = AtomicReference<List<DrawingStroke>>(emptyList())
+    private val drawingVersionRef = AtomicLong(0L)
+    private val pendingScreenshotCallback = AtomicReference<((Bitmap?) -> Unit)?>(null)
 
     private val screenFrameAvailable = AtomicBoolean(false)
     private val cameraFrameAvailable = AtomicBoolean(false)
@@ -149,8 +173,7 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
     private val cameraFrontRef = AtomicBoolean(true)
     private val heavyFiltersSuspendedRef = AtomicBoolean(false)
 
-    // Bounded GPU texture cache (max 16 images/text overlays)
-    private val textureCache = LinkedHashMap<String, CachedTexture>(16, 0.75f, true)
+    private val textureCache = LinkedHashMap<String, CachedTexture>(24, 0.75f, true)
     private var renderFrameCounter = 0L
 
     private var previewWidth = 0
@@ -247,6 +270,44 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         }
     }
 
+    fun setBrowserController(controller: OffscreenBrowserSourceController?) {
+        browserController = controller
+    }
+
+    fun setMediaAudioCallback(callback: ((ShortArray, Int) -> Unit)?) {
+        onMediaAudioCallback = callback
+    }
+
+    fun updateDynamicOverlays(
+        chatMessages: List<PlatformChatMessage>,
+        chatVersion: Long,
+        drawingStrokes: List<DrawingStroke>,
+        drawingVersion: Long
+    ) {
+        chatMessagesRef.set(chatMessages)
+        chatVersionRef.set(chatVersion)
+        drawingStrokesRef.set(drawingStrokes)
+        drawingVersionRef.set(drawingVersion)
+    }
+
+    fun captureScreenshot(onComplete: (Bitmap?) -> Unit) {
+        if (!running.get()) {
+            onComplete(null)
+            return
+        }
+        pendingScreenshotCallback.set(onComplete)
+    }
+
+    fun updateSourceDisplaySize(displayWidthPx: Int, displayHeightPx: Int) {
+        val w = max(1, displayWidthPx)
+        val h = max(1, displayHeightPx)
+        sourceDisplayWidth = w
+        sourceDisplayHeight = h
+        glHandler?.post {
+            runCatching { screenSurfaceTexture?.setDefaultBufferSize(w, h) }
+        }
+    }
+
     fun updateVideoConfig(videoConfig: VideoConfig) {
         configRef.set(videoConfig)
     }
@@ -265,6 +326,13 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
             cameraFrontRef.set(camSrc.useFrontCamera)
         }
         syncMediaSourceDecoder(programScene, previewScene, studioModeEnabled)
+        val browserSources = buildList {
+            programScene?.sources?.filter { it.type == SourceType.BROWSER_SOURCE && it.visible }?.let(::addAll)
+            if (studioModeEnabled) {
+                previewScene?.sources?.filter { it.type == SourceType.BROWSER_SOURCE && it.visible }?.let(::addAll)
+            }
+        }
+        browserController?.syncVisibleSources(browserSources)
     }
 
     fun triggerTransition(
@@ -318,6 +386,7 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
 
     fun setPreviewEnabled(enabled: Boolean) {
         previewEnabled.set(enabled)
+        browserController?.setPaused(!enabled)
     }
 
     fun setHeavyFiltersSuspended(suspended: Boolean) {
@@ -346,6 +415,8 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         activeMediaDecoder?.stop()
         activeMediaDecoder = null
         activeMediaSignature = null
+        gifHandles.values.forEach { it.release() }
+        gifHandles.clear()
 
         val handler = glHandler
         val thread = glThread
@@ -382,6 +453,7 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         if (sig == activeMediaSignature && activeMediaDecoder != null) {
             activeMediaDecoder?.loopPlayback = mediaSrc.mediaLoop
             activeMediaDecoder?.isPlaying = mediaSrc.mediaPlaying
+            activeMediaDecoder?.mediaMuted = mediaSrc.mediaMuted
             return
         }
 
@@ -390,14 +462,17 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         val surf = mediaInputSurface ?: return
         activeMediaSignature = sig
         activeMediaDecoder = MediaSourceDecoder(
-            filePath = mediaSrc.mediaPathOrUri.orEmpty(),
+            context = appContext,
+            filePathOrUri = mediaSrc.mediaPathOrUri.orEmpty(),
             outputSurface = surf,
+            onAudioPcm = { samples, count -> onMediaAudioCallback?.invoke(samples, count) },
             onError = { reason ->
                 onMediaErrorCallback?.invoke(mediaSrc.id, reason)
             }
         ).apply {
             loopPlayback = mediaSrc.mediaLoop
             isPlaying = mediaSrc.mediaPlaying
+            mediaMuted = mediaSrc.mediaMuted
             start()
         }
     }
@@ -413,7 +488,7 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
             EGL14.EGL_BLUE_SIZE, 8,
             EGL14.EGL_ALPHA_SIZE, 8,
             EGL14.EGL_RENDERABLE_TYPE, EGLExt.EGL_OPENGL_ES3_BIT_KHR,
-            0x3142, 1, // EGL_RECORDABLE_ANDROID
+            0x3142, 1,
             EGL14.EGL_NONE
         )
         val configs = arrayOfNulls<EGLConfig>(1)
@@ -432,22 +507,26 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         )
         EGL14.eglMakeCurrent(eglDisplay, dummyPbuffer, dummyPbuffer, eglContext)
 
+        // Vertex layout: aPos (vec2), aTex (vec2), aLocalUv (vec2) -> stride 24 bytes
         val vertexSrc = """
             #version 300 es
             layout(location = 0) in vec2 aPos;
             layout(location = 1) in vec2 aTex;
+            layout(location = 2) in vec2 aLocalUv;
             uniform mat4 uTexMatrix;
             out vec2 vTex;
+            out vec2 vLocalUv;
             void main() {
                 gl_Position = vec4(aPos, 0.0, 1.0);
                 vTex = (uTexMatrix * vec4(aTex, 0.0, 1.0)).xy;
+                vLocalUv = aLocalUv;
             }
         """.trimIndent()
 
         oesLocs = ShaderLocations(buildProgram(vertexSrc, buildFragmentShader(isOes = true)))
         tex2dLocs = ShaderLocations(buildProgram(vertexSrc, buildFragmentShader(isOes = false)))
 
-        quadBuffer = ByteBuffer.allocateDirect(16 * 4)
+        quadBuffer = ByteBuffer.allocateDirect(24 * 4)
             .order(ByteOrder.nativeOrder())
             .asFloatBuffer()
 
@@ -463,6 +542,7 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
             $ext
             precision mediump float;
             in vec2 vTex;
+            in vec2 vLocalUv;
             uniform $samplerType uSampler;
             uniform int uIsSolid;
             uniform vec4 uSolidColor;
@@ -480,41 +560,64 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
             uniform vec2 uTexelSize;
             uniform int uLutMode;
             uniform float uLutIntensity;
+            uniform int uShapeMode;
+            uniform float uBorderFrac;
+            uniform vec4 uBorderColor;
+            uniform int uPointFilter;
             out vec4 outColor;
+
+            float shapeSdf(vec2 uv, int mode) {
+                vec2 p = uv * 2.0 - 1.0;
+                if (mode == 2) { // Circle
+                    return length(p) - 1.0;
+                } else if (mode == 1) { // Rounded Box
+                    vec2 q = abs(p) - vec2(0.76);
+                    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - 0.24;
+                } else if (mode == 3) { // Squircle
+                    vec2 ap = pow(abs(p), vec2(4.0));
+                    return pow(ap.x + ap.y, 0.25) - 0.98;
+                } else if (mode == 4) { // Hexagon
+                    vec2 q = abs(p);
+                    float d = max(q.x * 0.866025 + q.y * 0.5, q.y);
+                    return d - 0.96;
+                }
+                return max(abs(p.x), abs(p.y)) - 1.0;
+            }
 
             vec3 applyLut(vec3 c, int mode, float intensity) {
                 vec3 graded = c;
                 if (mode == 1) {
-                    // Vivid Gaming: punchy contrast & saturation boost
                     float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
                     graded = clamp(mix(vec3(l), c, 1.32) * 1.06 - 0.03, 0.0, 1.0);
                 } else if (mode == 2) {
-                    // Teal & Orange
                     vec3 shadows = vec3(c.r * 0.88, c.g * 1.02, min(1.0, c.b * 1.16 + 0.04));
                     vec3 highs = vec3(min(1.0, c.r * 1.14 + 0.04), c.g * 1.01, c.b * 0.85);
                     float l = dot(c, vec3(0.299, 0.587, 0.114));
                     graded = mix(shadows, highs, smoothstep(0.18, 0.82, l));
                 } else if (mode == 3) {
-                    // Crisp Mono
                     float l = dot(c, vec3(0.299, 0.587, 0.114));
                     graded = vec3(clamp((l - 0.5) * 1.2 + 0.5, 0.0, 1.0));
                 } else if (mode == 4) {
-                    // Warm Cinema
                     graded = clamp(vec3(c.r * 1.08 + 0.02, c.g * 1.01, c.b * 0.90), 0.0, 1.0);
                 }
                 return mix(c, graded, intensity);
             }
 
             void main() {
-                vec4 base = (uIsSolid == 1) ? uSolidColor : texture(uSampler, vTex);
+                vec2 sampleUv = vTex;
+                if (uIsSolid == 0 && uPointFilter == 1 && uTexelSize.x > 0.0 && uTexelSize.y > 0.0) {
+                    vec2 texDims = 1.0 / uTexelSize;
+                    sampleUv = (floor(vTex * texDims) + 0.5) * uTexelSize;
+                }
+                vec4 base = (uIsSolid == 1) ? uSolidColor : texture(uSampler, sampleUv);
                 vec3 rgb = base.rgb;
                 float alpha = base.a * uOpacity;
 
                 if (uIsSolid == 0 && uSharpenEnabled == 1) {
-                    vec3 n = texture(uSampler, vTex + vec2(0.0, uTexelSize.y)).rgb;
-                    vec3 s = texture(uSampler, vTex - vec2(0.0, uTexelSize.y)).rgb;
-                    vec3 e = texture(uSampler, vTex + vec2(uTexelSize.x, 0.0)).rgb;
-                    vec3 w = texture(uSampler, vTex - vec2(uTexelSize.x, 0.0)).rgb;
+                    vec3 n = texture(uSampler, sampleUv + vec2(0.0, uTexelSize.y)).rgb;
+                    vec3 s = texture(uSampler, sampleUv - vec2(0.0, uTexelSize.y)).rgb;
+                    vec3 e = texture(uSampler, sampleUv + vec2(uTexelSize.x, 0.0)).rgb;
+                    vec3 w = texture(uSampler, sampleUv - vec2(uTexelSize.x, 0.0)).rgb;
                     vec3 blur = (n + s + e + w) * 0.25;
                     rgb = clamp(rgb + (rgb - blur) * uSharpenAmount * 1.6, 0.0, 1.0);
                 }
@@ -540,6 +643,18 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
 
                 if (uLutMode > 0) {
                     rgb = applyLut(rgb, uLutMode, uLutIntensity);
+                }
+
+                if (uShapeMode > 0 || uBorderFrac > 0.0001) {
+                    float d = shapeSdf(vLocalUv, uShapeMode);
+                    float maskAlpha = 1.0 - smoothstep(-0.015, 0.01, d);
+                    if (uBorderFrac > 0.0001) {
+                        float innerEdge = -uBorderFrac;
+                        float borderMix = smoothstep(innerEdge - 0.01, innerEdge + 0.005, d) * maskAlpha;
+                        rgb = mix(rgb, uBorderColor.rgb, borderMix * uBorderColor.a);
+                        alpha = max(alpha, borderMix * uBorderColor.a * uOpacity);
+                    }
+                    alpha *= maskAlpha;
                 }
 
                 outColor = vec4(rgb, clamp(alpha, 0.0, 1.0));
@@ -645,7 +760,13 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
             f
         } else 1f
 
-        // 1) Render PROGRAM (+ active transition) to Encoder Surface (exact output WxH, zero-copy)
+        // 0) Handle single-frame on-demand screenshot into offscreen FBO (only runs when user taps Shot)
+        pendingScreenshotCallback.getAndSet(null)?.let { cb ->
+            val bmp = renderProgramScreenshotFbo(cfg, programScene, activeTrans, transitionFraction)
+            cb(bmp)
+        }
+
+        // 1) Render PROGRAM (+ active transition) to Encoder Surface
         val encSurf = encoderEglSurface
         if (encSurf != null && encSurf != EGL14.EGL_NO_SURFACE) {
             EGL14.eglMakeCurrent(disp, encSurf, encSurf, ctx)
@@ -663,7 +784,7 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
             EGL14.eglSwapBuffers(disp, encSurf)
         }
 
-        // 2) Render to Preview Surface ONLY when UI is visible (Iron Rule R9)
+        // 2) Render to Preview Surface ONLY when UI is visible
         val prevSurf = previewEglSurface
         if (previewEnabled.get() && prevSurf != null && prevSurf != EGL14.EGL_NO_SURFACE && previewWidth > 0 && previewHeight > 0) {
             EGL14.eglMakeCurrent(disp, prevSurf, prevSurf, ctx)
@@ -673,11 +794,9 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
 
             if (studioMode) {
                 val halfW = (previewWidth / 2) - 2
-                // Left viewport: Preview scene (staged edits, NOT live)
                 GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
                 GLES30.glScissor(0, 0, max(1, halfW), previewHeight)
                 renderScenePass(0, 0, max(1, halfW), previewHeight, cfg, previewScene, globalAlpha = 1f, xOffsetNdc = 0f)
-                // Right viewport: Program scene (actually live / recorded)
                 val rightX = halfW + 4
                 val rightW = max(1, previewWidth - rightX)
                 GLES30.glScissor(rightX, 0, rightW, previewHeight)
@@ -692,6 +811,50 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         if (renderFrameCounter % 120L == 0L) {
             pruneUnusedCachedTextures()
         }
+    }
+
+    private fun renderProgramScreenshotFbo(
+        cfg: VideoConfig,
+        programScene: SceneModel?,
+        transition: ActiveTransition?,
+        transitionT: Float
+    ): Bitmap? {
+        val w = cfg.outputWidth.coerceIn(320, 1920)
+        val h = cfg.outputHeight.coerceIn(180, 1080)
+        if (screenshotFbo == 0 || screenshotW != w || screenshotH != h) {
+            if (screenshotFbo != 0) GLES30.glDeleteFramebuffers(1, intArrayOf(screenshotFbo), 0)
+            if (screenshotTex != 0) GLES30.glDeleteTextures(1, intArrayOf(screenshotTex), 0)
+            val fbos = IntArray(1)
+            val texs = IntArray(1)
+            GLES30.glGenFramebuffers(1, fbos, 0)
+            GLES30.glGenTextures(1, texs, 0)
+            screenshotFbo = fbos[0]
+            screenshotTex = texs[0]
+            screenshotW = w
+            screenshotH = h
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, screenshotTex)
+            GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, w, h, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, screenshotFbo)
+            GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, screenshotTex, 0)
+        } else {
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, screenshotFbo)
+        }
+        renderProgramViewport(0, 0, w, h, cfg, programScene, transition, transitionT, clearBg = true)
+        val buf = ByteBuffer.allocateDirect(w * h * 4).order(ByteOrder.LITTLE_ENDIAN)
+        GLES30.glReadPixels(0, 0, w, h, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, buf)
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+
+        return runCatching {
+            val raw = createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            buf.rewind()
+            raw.copyPixelsFromBuffer(buf)
+            val flip = Matrix().apply { postScale(1f, -1f, w * 0.5f, h * 0.5f) }
+            val out = Bitmap.createBitmap(raw, 0, 0, w, h, flip, false)
+            raw.recycle()
+            out
+        }.getOrNull()
     }
 
     private fun renderProgramViewport(
@@ -767,12 +930,22 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
             if (!src.visible) continue
             when (src.type) {
                 SourceType.SCREEN_CAPTURE -> drawScreenSource(src, cfg, globalAlpha, xOffsetNdc)
-                SourceType.CAMERA_2 -> drawOesSource(src, cameraTexId, cameraMatrix, mirrorU = src.useFrontCamera, globalAlpha = globalAlpha, xOffsetNdc = xOffsetNdc)
-                SourceType.MEDIA_SOURCE -> drawOesSource(src, mediaTexId, mediaMatrix, mirrorU = false, globalAlpha = globalAlpha, xOffsetNdc = xOffsetNdc)
+                SourceType.SCREEN_REGION -> drawScreenRegionSource(src, cfg, globalAlpha, xOffsetNdc)
+                SourceType.CAMERA_2 -> {
+                    val mirror = src.useFrontCamera != src.mirrorHorizontal
+                    drawOesSource(src, cameraTexId, cameraMatrix, mirrorU = mirror, globalAlpha = globalAlpha, xOffsetNdc = xOffsetNdc)
+                }
+                SourceType.MEDIA_SOURCE -> drawOesSource(src, mediaTexId, mediaMatrix, mirrorU = src.mirrorHorizontal, globalAlpha = globalAlpha, xOffsetNdc = xOffsetNdc)
                 SourceType.COLOR_SOURCE -> drawColorSource(src, globalAlpha, xOffsetNdc)
                 SourceType.IMAGE_SOURCE -> drawImageSource(src, cfg, globalAlpha, xOffsetNdc)
+                SourceType.GIF_STICKER -> drawGifStickerSource(src, cfg, globalAlpha, xOffsetNdc)
+                SourceType.BROWSER_SOURCE -> drawBrowserSource(src, globalAlpha, xOffsetNdc)
+                SourceType.CHAT_OVERLAY -> drawChatOverlaySource(src, globalAlpha, xOffsetNdc)
                 SourceType.TEXT_SOURCE -> drawTextSource(src, globalAlpha, xOffsetNdc)
-                SourceType.MIC_AUDIO, SourceType.SYSTEM_AUDIO -> Unit
+                SourceType.TIMER_SOURCE -> drawTimerSource(src, globalAlpha, xOffsetNdc)
+                SourceType.SCOREBOARD_SOURCE -> drawScoreboardSource(src, globalAlpha, xOffsetNdc)
+                SourceType.DRAWING_LAYER -> drawInkLayerSource(src, cfg, globalAlpha, xOffsetNdc)
+                SourceType.MIC_AUDIO, SourceType.SYSTEM_AUDIO, SourceType.SOUNDBOARD_SOURCE -> Unit
             }
         }
     }
@@ -785,7 +958,7 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         GLES30.glUniform1i(locs.uSampler, 0)
         GLES30.glUniform1i(locs.uIsSolid, 0)
         GLES30.glUniformMatrix4fv(locs.uTexMatrix, 1, false, screenMatrix, 0)
-        applyFilterUniforms(locs, src.videoFilters, globalAlpha, cfg.canvasWidth, cfg.canvasHeight)
+        applyFilterUniforms(locs, src, src.videoFilters, globalAlpha, sourceDisplayWidth, sourceDisplayHeight)
 
         val t = src.transform
         val isCustomTransform = t.xFraction != 0f || t.yFraction != 0f || t.widthFraction != 1f || t.heightFraction != 1f || t.rotationDegrees != 0f
@@ -823,6 +996,24 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         }
     }
 
+    private fun drawScreenRegionSource(src: SourceModel, cfg: VideoConfig, globalAlpha: Float, xOffsetNdc: Float) {
+        val locs = oesLocs ?: return
+        GLES30.glUseProgram(locs.programId)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+        GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, screenTexId)
+        GLES30.glUniform1i(locs.uSampler, 0)
+        GLES30.glUniform1i(locs.uIsSolid, 0)
+        GLES30.glUniformMatrix4fv(locs.uTexMatrix, 1, false, screenMatrix, 0)
+        applyFilterUniforms(locs, src, src.videoFilters, globalAlpha, sourceDisplayWidth, sourceDisplayHeight)
+
+        val t = src.transform
+        val u0 = t.cropLeft.coerceIn(0f, 0.9f)
+        val u1 = (1f - t.cropRight).coerceIn(u0 + 0.05f, 1f)
+        val v0 = t.cropBottom.coerceIn(0f, 0.9f)
+        val v1 = (1f - t.cropTop).coerceIn(v0 + 0.05f, 1f)
+        drawTransformedQuad(src, u0 = u0, v0 = v0, u1 = u1, v1 = v1, xOffsetNdc = xOffsetNdc)
+    }
+
     private fun drawOesSource(
         src: SourceModel,
         texId: Int,
@@ -838,11 +1029,11 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         GLES30.glUniform1i(locs.uSampler, 0)
         GLES30.glUniform1i(locs.uIsSolid, 0)
         GLES30.glUniformMatrix4fv(locs.uTexMatrix, 1, false, texMatrix, 0)
-        applyFilterUniforms(locs, src.videoFilters, globalAlpha, 640, 360)
+        applyFilterUniforms(locs, src, src.videoFilters, globalAlpha, 640, 360)
 
         val t = src.transform
-        val u0 = if (mirrorU) 1f - t.cropLeft else t.cropLeft
-        val u1 = if (mirrorU) t.cropRight else 1f - t.cropRight
+        val u0 = if (mirrorU) 1f - t.cropRight else t.cropLeft
+        val u1 = if (mirrorU) t.cropLeft else 1f - t.cropRight
         drawTransformedQuad(src, u0 = u0, v0 = t.cropBottom, u1 = u1, v1 = 1f - t.cropTop, xOffsetNdc = xOffsetNdc)
     }
 
@@ -856,7 +1047,7 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         val b = (src.colorArgb and 0xFF) / 255f
         GLES30.glUniform4f(locs.uSolidColor, r, g, b, a)
         GLES30.glUniformMatrix4fv(locs.uTexMatrix, 1, false, identityMatrix, 0)
-        applyFilterUniforms(locs, src.videoFilters, globalAlpha, 1280, 720)
+        applyFilterUniforms(locs, src, src.videoFilters, globalAlpha, 1280, 720)
         drawTransformedQuad(src, 0f, 0f, 1f, 1f, xOffsetNdc)
     }
 
@@ -864,6 +1055,101 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         val path = src.mediaPathOrUri ?: return
         val cached = getOrLoadImageTexture(path, cfg.canvasWidth, cfg.canvasHeight) ?: return
         draw2dTexture(src, cached, globalAlpha, xOffsetNdc)
+    }
+
+    private fun drawGifStickerSource(src: SourceModel, cfg: VideoConfig, globalAlpha: Float, xOffsetNdc: Float) {
+        val path = src.mediaPathOrUri ?: return
+        val handle = gifHandles.getOrPut(src.id) {
+            DynamicSourceRenderer.loadAnimatedSticker(appContext, path, maxSize = 512)
+                ?: return
+        }
+        val bmp = handle.currentFrameBitmap() ?: return
+        val cached = updateOrCreateDynamicTexture(
+            key = "gif|${src.id}",
+            version = renderFrameCounter, // animate each compositor frame smoothly
+            bmp = bmp,
+            recycleAfterUpload = false
+        )
+        draw2dTexture(src, cached, globalAlpha, xOffsetNdc)
+    }
+
+    private fun drawBrowserSource(src: SourceModel, globalAlpha: Float, xOffsetNdc: Float) {
+        val snap = browserController?.getLatestFrame(src.id) ?: return
+        val key = "web|${src.id}"
+        val existing = textureCache[key]
+        val tex = if (existing != null && existing.version == snap.version) {
+            existing.lastUsedFrame = renderFrameCounter
+            existing
+        } else {
+            updateOrCreateDynamicTexture(
+                key = key,
+                version = snap.version,
+                bmp = snap.bitmap,
+                recycleAfterUpload = false
+            )
+        }
+        draw2dTexture(src, tex, globalAlpha, xOffsetNdc)
+    }
+
+    private fun drawChatOverlaySource(src: SourceModel, globalAlpha: Float, xOffsetNdc: Float) {
+        val chatVer = chatVersionRef.get()
+        val combinedVersion = chatVer * 31L + (src.chatOverlayMaxMessages * 100) + (src.chatOverlayOpacity * 100).toInt()
+        val key = "chat|${src.id}"
+        val existing = textureCache[key]
+        val tex = if (existing != null && existing.version == combinedVersion) {
+            existing.lastUsedFrame = renderFrameCounter
+            existing
+        } else {
+            val bmp = DynamicSourceRenderer.renderChatOverlayBitmap(chatMessagesRef.get(), src)
+            updateOrCreateDynamicTexture(key, combinedVersion, bmp, recycleAfterUpload = true)
+        }
+        draw2dTexture(src, tex, globalAlpha, xOffsetNdc)
+    }
+
+    private fun drawTimerSource(src: SourceModel, globalAlpha: Float, xOffsetNdc: Float) {
+        val nowMs = System.currentTimeMillis()
+        val text = DynamicSourceRenderer.computeTimerDisplayString(src, nowMs)
+        val ver = text.hashCode().toLong() * 31L + (if (src.timerRunning) 1L else 0L) + (if (src.timerCountDown) 2L else 0L)
+        val key = "timer|${src.id}"
+        val existing = textureCache[key]
+        val tex = if (existing != null && existing.version == ver) {
+            existing.lastUsedFrame = renderFrameCounter
+            existing
+        } else {
+            val bmp = DynamicSourceRenderer.renderTimerBitmap(src, nowMs)
+            updateOrCreateDynamicTexture(key, ver, bmp, recycleAfterUpload = true)
+        }
+        draw2dTexture(src, tex, globalAlpha, xOffsetNdc)
+    }
+
+    private fun drawScoreboardSource(src: SourceModel, globalAlpha: Float, xOffsetNdc: Float) {
+        val ver = ("${src.scoreHomeName}|${src.scoreAwayName}|${src.scoreHome}|${src.scoreAway}").hashCode().toLong()
+        val key = "score|${src.id}"
+        val existing = textureCache[key]
+        val tex = if (existing != null && existing.version == ver) {
+            existing.lastUsedFrame = renderFrameCounter
+            existing
+        } else {
+            val bmp = DynamicSourceRenderer.renderScoreboardBitmap(src)
+            updateOrCreateDynamicTexture(key, ver, bmp, recycleAfterUpload = true)
+        }
+        draw2dTexture(src, tex, globalAlpha, xOffsetNdc)
+    }
+
+    private fun drawInkLayerSource(src: SourceModel, cfg: VideoConfig, globalAlpha: Float, xOffsetNdc: Float) {
+        val strokes = drawingStrokesRef.get()
+        if (strokes.isEmpty()) return
+        val ver = drawingVersionRef.get()
+        val key = "ink|${src.id}"
+        val existing = textureCache[key]
+        val tex = if (existing != null && existing.version == ver) {
+            existing.lastUsedFrame = renderFrameCounter
+            existing
+        } else {
+            val bmp = DynamicSourceRenderer.renderDrawingBitmap(strokes, cfg.canvasWidth, cfg.canvasHeight)
+            updateOrCreateDynamicTexture(key, ver, bmp, recycleAfterUpload = true)
+        }
+        draw2dTexture(src, tex, globalAlpha, xOffsetNdc)
     }
 
     private fun drawTextSource(src: SourceModel, globalAlpha: Float, xOffsetNdc: Float) {
@@ -877,17 +1163,24 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         GLES30.glUseProgram(locs.programId)
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, tex.texId)
+        val usePoint = src.videoFilters.scaleAspectEnabled && src.videoFilters.scaleFilter == ScaleFilterType.POINT
+        val glFilter = if (usePoint) GLES30.GL_NEAREST else GLES30.GL_LINEAR
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, glFilter)
+        GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, glFilter)
+
         GLES30.glUniform1i(locs.uSampler, 0)
         GLES30.glUniform1i(locs.uIsSolid, 0)
         GLES30.glUniformMatrix4fv(locs.uTexMatrix, 1, false, identityMatrix, 0)
-        applyFilterUniforms(locs, src.videoFilters, globalAlpha, tex.width, tex.height)
+        applyFilterUniforms(locs, src, src.videoFilters, globalAlpha, tex.width, tex.height)
 
         val t = src.transform
+        val u0 = if (src.mirrorHorizontal) 1f - t.cropRight else t.cropLeft
+        val u1 = if (src.mirrorHorizontal) t.cropLeft else 1f - t.cropRight
         drawTransformedQuad(
             src = src,
-            u0 = t.cropLeft,
+            u0 = u0,
             v0 = 1f - t.cropBottom,
-            u1 = 1f - t.cropRight,
+            u1 = u1,
             v1 = t.cropTop,
             xOffsetNdc = xOffsetNdc
         )
@@ -906,12 +1199,16 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         GLES30.glUniform1i(locs.uChromaEnabled, 0)
         GLES30.glUniform1i(locs.uSharpenEnabled, 0)
         GLES30.glUniform1i(locs.uLutMode, 0)
+        GLES30.glUniform1i(locs.uShapeMode, 0)
+        GLES30.glUniform1f(locs.uBorderFrac, 0f)
+        GLES30.glUniform1i(locs.uPointFilter, 0)
         GLES30.glUniformMatrix4fv(locs.uTexMatrix, 1, false, identityMatrix, 0)
         drawQuad(-1f, -1f, 1f, 1f, 0f, 0f, 1f, 1f)
     }
 
     private fun applyFilterUniforms(
         locs: ShaderLocations,
+        src: SourceModel,
         f: VideoFilterConfig,
         globalAlpha: Float,
         texW: Int,
@@ -933,9 +1230,15 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         GLES30.glUniform3f(locs.uChromaColor, ckR, ckG, ckB)
         GLES30.glUniform3f(locs.uChromaParams, f.chromaSimilarity, f.chromaSmoothness, f.chromaSpill)
 
-        GLES30.glUniform1i(locs.uSharpenEnabled, if (!suspended && f.sharpenEnabled) 1 else 0)
-        GLES30.glUniform1f(locs.uSharpenAmount, f.sharpenAmount)
+        val autoBicubicSharpen = !suspended && f.scaleAspectEnabled && f.scaleFilter == ScaleFilterType.BICUBIC
+        val sharpenOn = (!suspended && f.sharpenEnabled) || autoBicubicSharpen
+        val sharpenAmt = if (f.sharpenEnabled) f.sharpenAmount else if (autoBicubicSharpen) 0.25f else 0f
+        GLES30.glUniform1i(locs.uSharpenEnabled, if (sharpenOn) 1 else 0)
+        GLES30.glUniform1f(locs.uSharpenAmount, sharpenAmt)
         GLES30.glUniform2f(locs.uTexelSize, 1f / max(1, texW), 1f / max(1, texH))
+
+        val usePoint = f.scaleAspectEnabled && f.scaleFilter == ScaleFilterType.POINT
+        GLES30.glUniform1i(locs.uPointFilter, if (usePoint) 1 else 0)
 
         val lutIdx = if (suspended || !f.lutEnabled) 0 else when (f.lutPreset) {
             LutPreset.NONE -> 0
@@ -946,6 +1249,16 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         }
         GLES30.glUniform1i(locs.uLutMode, lutIdx)
         GLES30.glUniform1f(locs.uLutIntensity, f.lutIntensity)
+
+        val shapeCode = if (src.type == SourceType.CAMERA_2) src.facecamShape.shaderCode else FacecamShape.RECTANGLE.shaderCode
+        GLES30.glUniform1i(locs.uShapeMode, shapeCode)
+        val borderFrac = (src.borderWidthPx / 320f).coerceIn(0f, 0.16f)
+        GLES30.glUniform1f(locs.uBorderFrac, borderFrac)
+        val ba = ((src.borderColorArgb ushr 24) and 0xFF) / 255f
+        val br = ((src.borderColorArgb ushr 16) and 0xFF) / 255f
+        val bg = ((src.borderColorArgb ushr 8) and 0xFF) / 255f
+        val bb = (src.borderColorArgb and 0xFF) / 255f
+        GLES30.glUniform4f(locs.uBorderColor, br, bg, bb, ba)
     }
 
     private fun drawTransformedQuad(
@@ -978,10 +1291,10 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
 
         val buf = quadBuffer ?: return
         buf.clear()
-        buf.put(rotX(leftNdc, bottomNdc)).put(rotY(leftNdc, bottomNdc)).put(u0).put(v0)
-        buf.put(rotX(rightNdc, bottomNdc)).put(rotY(rightNdc, bottomNdc)).put(u1).put(v0)
-        buf.put(rotX(leftNdc, topNdc)).put(rotY(leftNdc, topNdc)).put(u0).put(v1)
-        buf.put(rotX(rightNdc, topNdc)).put(rotY(rightNdc, topNdc)).put(u1).put(v1)
+        buf.put(rotX(leftNdc, bottomNdc)).put(rotY(leftNdc, bottomNdc)).put(u0).put(v0).put(0f).put(0f)
+        buf.put(rotX(rightNdc, bottomNdc)).put(rotY(rightNdc, bottomNdc)).put(u1).put(v0).put(1f).put(0f)
+        buf.put(rotX(leftNdc, topNdc)).put(rotY(leftNdc, topNdc)).put(u0).put(v1).put(0f).put(1f)
+        buf.put(rotX(rightNdc, topNdc)).put(rotY(rightNdc, topNdc)).put(u1).put(v1).put(1f).put(1f)
         buf.flip()
         submitQuadBuffer(buf)
     }
@@ -998,10 +1311,10 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
     ) {
         val buf = quadBuffer ?: return
         buf.clear()
-        buf.put(left).put(bottom).put(u0).put(v0)
-        buf.put(right).put(bottom).put(u1).put(v0)
-        buf.put(left).put(top).put(u0).put(v1)
-        buf.put(right).put(top).put(u1).put(v1)
+        buf.put(left).put(bottom).put(u0).put(v0).put(0f).put(0f)
+        buf.put(right).put(bottom).put(u1).put(v0).put(1f).put(0f)
+        buf.put(left).put(top).put(u0).put(v1).put(0f).put(1f)
+        buf.put(right).put(top).put(u1).put(v1).put(1f).put(1f)
         buf.flip()
         submitQuadBuffer(buf)
     }
@@ -1009,37 +1322,49 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
     private fun submitQuadBuffer(buf: FloatBuffer) {
         GLES30.glEnableVertexAttribArray(0)
         GLES30.glEnableVertexAttribArray(1)
+        GLES30.glEnableVertexAttribArray(2)
         buf.position(0)
-        GLES30.glVertexAttribPointer(0, 2, GLES30.GL_FLOAT, false, 16, buf)
+        GLES30.glVertexAttribPointer(0, 2, GLES30.GL_FLOAT, false, 24, buf)
         buf.position(2)
-        GLES30.glVertexAttribPointer(1, 2, GLES30.GL_FLOAT, false, 16, buf)
+        GLES30.glVertexAttribPointer(1, 2, GLES30.GL_FLOAT, false, 24, buf)
+        buf.position(4)
+        GLES30.glVertexAttribPointer(2, 2, GLES30.GL_FLOAT, false, 24, buf)
         GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
     }
 
-    private fun getOrLoadImageTexture(path: String, maxW: Int, maxH: Int): CachedTexture? {
-        val key = "img|$path"
+    private fun getOrLoadImageTexture(pathOrUri: String, maxW: Int, maxH: Int): CachedTexture? {
+        val key = "img|$pathOrUri"
         textureCache[key]?.let {
             it.lastUsedFrame = renderFrameCounter
             return it
         }
-        val f = File(path)
-        if (!f.exists() || !f.canRead()) {
-            onMediaErrorCallback?.invoke(path, "Missing image file: ${f.name}")
-            return null
+        val ctx = appContext
+        val bmp: Bitmap? = if (pathOrUri.startsWith("content://") && ctx != null) {
+            runCatching {
+                val uri = Uri.parse(pathOrUri)
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                ctx.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+                if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+                var sample = 1
+                while ((bounds.outWidth / sample) > maxW * 2 || (bounds.outHeight / sample) > maxH * 2) sample *= 2
+                val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+                ctx.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
+            }.getOrNull()
+        } else {
+            val f = File(pathOrUri)
+            if (!f.exists() || !f.canRead()) {
+                onMediaErrorCallback?.invoke(pathOrUri, "Missing image file: ${f.name}")
+                return null
+            }
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(pathOrUri, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+            var sample = 1
+            while ((bounds.outWidth / sample) > maxW * 2 || (bounds.outHeight / sample) > maxH * 2) sample *= 2
+            BitmapFactory.decodeFile(pathOrUri, BitmapFactory.Options().apply { inSampleSize = sample })
         }
-
-        // Size-aware decode: never load oversized bitmaps full resolution (M2.1 Gate)
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(path, bounds)
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
-
-        var sample = 1
-        while ((bounds.outWidth / sample) > maxW * 2 || (bounds.outHeight / sample) > maxH * 2) {
-            sample *= 2
-        }
-        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-        val bmp = BitmapFactory.decodeFile(path, opts) ?: return null
-        return uploadBitmapToCache(key, bmp)
+        if (bmp == null) return null
+        return uploadBitmapToCache(key, bmp, version = 1L)
     }
 
     private fun getOrRenderTextTexture(key: String, src: SourceModel): CachedTexture? {
@@ -1068,11 +1393,41 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
             canvas.drawText(line, pad.toFloat(), y, paint)
             y += lineHeight
         }
-        return uploadBitmapToCache(key, bmp)
+        return uploadBitmapToCache(key, bmp, version = 1L)
     }
 
-    private fun uploadBitmapToCache(key: String, bmp: Bitmap): CachedTexture {
-        evictIfOverCapacity(maxEntries = 15)
+    private fun updateOrCreateDynamicTexture(
+        key: String,
+        version: Long,
+        bmp: Bitmap,
+        recycleAfterUpload: Boolean
+    ): CachedTexture {
+        val existing = textureCache[key]
+        if (existing != null) {
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, existing.texId)
+            if (existing.width == bmp.width && existing.height == bmp.height) {
+                GLUtils.texSubImage2D(GLES30.GL_TEXTURE_2D, 0, 0, 0, bmp)
+            } else {
+                GLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, bmp, 0)
+                existing.width = bmp.width
+                existing.height = bmp.height
+            }
+            existing.version = version
+            existing.lastUsedFrame = renderFrameCounter
+            if (recycleAfterUpload) bmp.recycle()
+            return existing
+        }
+        val uploaded = uploadBitmapToCache(key, bmp, version = version, recycleBitmap = recycleAfterUpload)
+        return uploaded
+    }
+
+    private fun uploadBitmapToCache(
+        key: String,
+        bmp: Bitmap,
+        version: Long = 0L,
+        recycleBitmap: Boolean = true
+    ): CachedTexture {
+        evictIfOverCapacity(maxEntries = 22)
         val ids = IntArray(1)
         GLES30.glGenTextures(1, ids, 0)
         val texId = ids[0]
@@ -1084,9 +1439,16 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         GLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, bmp, 0)
         val w = bmp.width
         val h = bmp.height
-        bmp.recycle()
+        if (recycleBitmap) bmp.recycle()
 
-        val entry = CachedTexture(texId = texId, key = key, width = w, height = h, lastUsedFrame = renderFrameCounter)
+        val entry = CachedTexture(
+            texId = texId,
+            key = key,
+            width = w,
+            height = h,
+            lastUsedFrame = renderFrameCounter,
+            version = version
+        )
         textureCache[key] = entry
         return entry
     }
@@ -1140,6 +1502,11 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         cameraSurfaceTexture = null
         mediaInputSurface = null
         mediaSurfaceTexture = null
+
+        if (screenshotFbo != 0) GLES30.glDeleteFramebuffers(1, intArrayOf(screenshotFbo), 0)
+        if (screenshotTex != 0) GLES30.glDeleteTextures(1, intArrayOf(screenshotTex), 0)
+        screenshotFbo = 0
+        screenshotTex = 0
 
         textureCache.values.forEach { entry ->
             GLES30.glDeleteTextures(1, intArrayOf(entry.texId), 0)

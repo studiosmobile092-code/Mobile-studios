@@ -40,6 +40,9 @@ class FloatingApertureOverlay(
     private val context: Context,
     private val onToggleStream: () -> Unit,
     private val onToggleRecord: () -> Unit,
+    private val onTogglePauseRecord: () -> Unit,
+    private val onSaveReplay: () -> Unit,
+    private val onCaptureScreenshot: () -> Unit,
     private val onToggleMicMute: () -> Unit,
     private val onToggleGameMute: () -> Unit,
     private val onNextScene: () -> Unit,
@@ -56,6 +59,9 @@ class FloatingApertureOverlay(
     private var menuContainer: LinearLayout? = null
     private var streamBtn: TextView? = null
     private var recordBtn: TextView? = null
+    private var pauseRecBtn: TextView? = null
+    private var replayBtn: TextView? = null
+    private var shotBtn: TextView? = null
     private var micMuteBtn: TextView? = null
     private var gameMuteBtn: TextView? = null
     private var sceneBtn: TextView? = null
@@ -73,6 +79,7 @@ class FloatingApertureOverlay(
     private var currentThermal = ThermalSummary()
     private var currentMicMuted = false
     private var currentGameMuted = false
+    private var currentReplayEnabled = false
     private var currentSceneName = "Scene"
     private var currentPresetId = PresetId.BALANCED
 
@@ -131,10 +138,18 @@ class FloatingApertureOverlay(
         }
         val row2 = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 0, 0, (4 * density).toInt())
+        }
+        val row3 = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
         }
 
         val sBtn = buildMenuButton("Stream", density) { handleStreamTap() }
         val rBtn = buildMenuButton("Record", density) { handleRecordTap() }
+        val prBtn = buildMenuButton("Pause", density) {
+            rescheduleAutoCollapse()
+            onTogglePauseRecord()
+        }
         val mBtn = buildMenuButton("Mic", density) {
             rescheduleAutoCollapse()
             onToggleMicMute()
@@ -142,6 +157,14 @@ class FloatingApertureOverlay(
         val gBtn = buildMenuButton("Game", density) {
             rescheduleAutoCollapse()
             onToggleGameMute()
+        }
+        val rpBtn = buildMenuButton("Replay", density) {
+            rescheduleAutoCollapse()
+            onSaveReplay()
+        }
+        val shBtn = buildMenuButton("Shot", density) {
+            rescheduleAutoCollapse()
+            onCaptureScreenshot()
         }
         val scBtn = buildMenuButton("Scene", density) {
             rescheduleAutoCollapse()
@@ -158,13 +181,17 @@ class FloatingApertureOverlay(
 
         row1.addView(sBtn)
         row1.addView(rBtn)
-        row1.addView(mBtn)
-        row1.addView(gBtn)
-        row2.addView(scBtn)
-        row2.addView(pBtn)
-        row2.addView(uBtn)
+        row1.addView(prBtn)
+        row2.addView(mBtn)
+        row2.addView(gBtn)
+        row2.addView(rpBtn)
+        row2.addView(shBtn)
+        row3.addView(scBtn)
+        row3.addView(pBtn)
+        row3.addView(uBtn)
         menu.addView(row1)
         menu.addView(row2)
+        menu.addView(row3)
 
         root.addView(badge)
         root.addView(menu)
@@ -199,6 +226,9 @@ class FloatingApertureOverlay(
             menuContainer = menu
             streamBtn = sBtn
             recordBtn = rBtn
+            pauseRecBtn = prBtn
+            replayBtn = rpBtn
+            shotBtn = shBtn
             micMuteBtn = mBtn
             gameMuteBtn = gBtn
             sceneBtn = scBtn
@@ -217,6 +247,7 @@ class FloatingApertureOverlay(
         thermal: ThermalSummary,
         micMuted: Boolean,
         gameMuted: Boolean,
+        replayEnabled: Boolean,
         sceneName: String,
         presetId: PresetId
     ) {
@@ -225,6 +256,7 @@ class FloatingApertureOverlay(
         currentThermal = thermal
         currentMicMuted = micMuted
         currentGameMuted = gameMuted
+        currentReplayEnabled = replayEnabled
         currentSceneName = sceneName
         currentPresetId = presetId
         if (!isShowing) return
@@ -248,6 +280,9 @@ class FloatingApertureOverlay(
         menuContainer = null
         streamBtn = null
         recordBtn = null
+        pauseRecBtn = null
+        replayBtn = null
+        shotBtn = null
         micMuteBtn = null
         gameMuteBtn = null
         sceneBtn = null
@@ -267,7 +302,8 @@ class FloatingApertureOverlay(
         val isLive = currentSessionPhase == SessionPhase.LIVE ||
             currentSessionPhase == SessionPhase.CONNECTING ||
             currentSessionPhase == SessionPhase.RECONNECTING
-        val isRec = currentRecPhase == RecordingPhase.RECORDING
+        val isRecActive = currentRecPhase == RecordingPhase.RECORDING || currentRecPhase == RecordingPhase.PAUSED
+        val isPaused = currentRecPhase == RecordingPhase.PAUSED
 
         streamBtn?.text = when {
             pendingStopStreamConfirm -> "Confirm"
@@ -277,10 +313,13 @@ class FloatingApertureOverlay(
         }
         recordBtn?.text = when {
             pendingStopRecordConfirm -> "Confirm"
-            isRec -> "Stop Rec"
+            isRecActive -> "Stop Rec"
             currentSessionPhase == SessionPhase.ARMED || isLive -> "Rec"
             else -> "Arm UI"
         }
+        pauseRecBtn?.visibility = if (isRecActive) View.VISIBLE else View.GONE
+        pauseRecBtn?.text = if (isPaused) "Resume" else "Pause"
+        replayBtn?.visibility = if (currentReplayEnabled) View.VISIBLE else View.GONE
         micMuteBtn?.text = if (currentMicMuted) "Mic: OFF" else "Mic: ON"
         gameMuteBtn?.text = if (currentGameMuted) "Game: OFF" else "Game: ON"
         sceneBtn?.text = context.getString(R.string.overlay_next_scene, currentSceneName.take(8))
@@ -311,7 +350,7 @@ class FloatingApertureOverlay(
     }
 
     private fun handleRecordTap() {
-        val isRec = currentRecPhase == RecordingPhase.RECORDING
+        val isRec = currentRecPhase == RecordingPhase.RECORDING || currentRecPhase == RecordingPhase.PAUSED
         if (isRec) {
             if (!pendingStopRecordConfirm) {
                 pendingStopRecordConfirm = true
@@ -481,6 +520,7 @@ class FloatingApertureOverlay(
             ringColor = when {
                 session == SessionPhase.ERROR || rec == RecordingPhase.ERROR -> "#FF4D4F".toColorInt()
                 session == SessionPhase.LIVE -> "#A30000".toColorInt()
+                rec == RecordingPhase.PAUSED -> "#F5A524".toColorInt()
                 rec == RecordingPhase.RECORDING -> "#720000".toColorInt()
                 thermalWarn -> "#F5A524".toColorInt()
                 session == SessionPhase.ARMED -> Color.WHITE

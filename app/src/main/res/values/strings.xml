@@ -10,4 +10,7 @@
     <string name="overlay_permission_title">Floating Aperture Control</string>
     <string name="overlay_permission_rationale">Allows Mobile Labs to show a compact draggable aperture button over your games so you can start or stop streaming and recording without leaving gameplay. Optional: you can always control outputs from the notification bar instead.</string>
     <string name="overlay_next_scene">Next (%1$s)</string>
+    <string name="action_pause_record">Pause Rec</string>
+    <string name="action_resume_record">Resume Rec</string>
+    <string name="action_save_replay">Save Replay</string>
 </resources>

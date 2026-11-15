@@ -129,6 +129,9 @@ dependencies {
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
 
+  implementation(libs.androidx.browser)
+  implementation(libs.okhttp)
+
   // Unused template libraries commented out to keep APK lean and dependency footprint minimal.
   // implementation(platform(libs.firebase.bom))
   // implementation(libs.accompanist.permissions)
@@ -145,7 +148,6 @@ dependencies {
   // implementation(libs.firebase.appcheck.debug)
   // implementation(libs.logging.interceptor)
   // implementation(libs.moshi.kotlin)
-  // implementation(libs.okhttp)
   // implementation(libs.retrofit)
 
   testImplementation(libs.androidx.compose.ui.test.junit4)
