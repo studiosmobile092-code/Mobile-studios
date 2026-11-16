@@ -591,7 +591,8 @@ fun WorkspaceScreen(
         )
     }
 
-    editingVideoFilterSrc?.let { src ->
+    editingVideoFilterSrc?.let { snap ->
+        val src = editableScene?.sources?.firstOrNull { it.id == snap.id } ?: snap
         VideoFiltersDialog(
             source = src,
             compositorMicros = state.telemetry.compositorPassMicros,
@@ -600,7 +601,8 @@ fun WorkspaceScreen(
         )
     }
 
-    editingAudioFilterCh?.let { ch ->
+    editingAudioFilterCh?.let { snap ->
+        val ch = state.audioChannels.firstOrNull { it.id == snap.id } ?: snap
         AudioFiltersDialog(
             channel = ch,
             onDismiss = { editingAudioFilterCh = null },

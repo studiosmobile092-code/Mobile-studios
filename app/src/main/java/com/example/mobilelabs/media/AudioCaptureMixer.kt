@@ -26,6 +26,7 @@ import com.example.mobilelabs.model.AudioMonitoringMode
 import com.example.mobilelabs.model.SoundboardPad
 import com.example.mobilelabs.model.VoiceEffectPreset
 import java.io.File
+import java.nio.ByteOrder
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.PI
@@ -581,6 +582,7 @@ class AudioCaptureMixer(
         val micTrackBuf = ShortArray(frameSamples)
         val gameTrackBuf = ShortArray(frameSamples)
         val monitorBuf = ShortArray(frameSamples)
+        val sfxFloatBuf = FloatArray(frameSamples)
 
         var consecutiveGameSilenceFrames = 0
         var duckGain = 1f
@@ -682,18 +684,32 @@ class AudioCaptureMixer(
             val monitorActive = gMonitorMode != AudioMonitoringMode.OFF || mMonitorMode != AudioMonitoringMode.OFF
             val trackCb = onIsolatedAudioTracksPcm
 
+            sfxFloatBuf.fill(0f)
+            if (activeSfxClips.isNotEmpty()) {
+                val mutedNow = masterMuted
+                for (clip in activeSfxClips) {
+                    var cursor = clip.cursor
+                    val clipSamples = clip.samples
+                    val remaining = clipSamples.size - cursor
+                    if (remaining > 0) {
+                        val take = min(frameSamples, remaining)
+                        if (!mutedNow) {
+                            val volScale = clip.volume / 32768f
+                            for (i in 0 until take) {
+                                sfxFloatBuf[i] += clipSamples[cursor + i] * volScale
+                            }
+                        }
+                        clip.cursor = cursor + take
+                    }
+                }
+                activeSfxClips.removeAll { it.cursor >= it.samples.size }
+            }
+
             for (i in 0 until frameSamples) {
                 val gDucked = gameFloatBuf[i] * duckGain
                 gameRmsSum += (gDucked * gDucked)
                 val mProcessed = micFloatBuf[i]
-                var sfxFloat = 0f
-                if (activeSfxClips.isNotEmpty() && !masterMuted) {
-                    for (clip in activeSfxClips) {
-                        if (clip.cursor < clip.samples.size) {
-                            sfxFloat += (clip.samples[clip.cursor++] / 32768f) * clip.volume
-                        }
-                    }
-                }
+                val sfxFloat = sfxFloatBuf[i]
                 val gOut = if (gIncludeOut) gDucked else 0f
                 val mOut = if (mIncludeOut) mProcessed else 0f
                 val sum = gOut + mOut + sfxFloat
@@ -713,9 +729,6 @@ class AudioCaptureMixer(
                         (if (mMonitorMode != AudioMonitoringMode.OFF) mProcessed else 0f)
                     monitorBuf[i] = (monSum.coerceIn(-1f, 1f) * 32767f).toInt().toShort()
                 }
-            }
-            if (activeSfxClips.isNotEmpty()) {
-                activeSfxClips.removeAll { it.cursor >= it.samples.size }
             }
             lastAudioDspMicros = (System.nanoTime() - dspStartNs) / 1000L
 
@@ -821,6 +834,7 @@ class AudioCaptureMixer(
                     if (ob != null && info.size > 0) {
                         ob.position(info.offset)
                         ob.limit(info.offset + info.size)
+                        ob.order(ByteOrder.nativeOrder())
                         val sv = ob.asShortBuffer()
                         val raw = ShortArray(sv.remaining())
                         sv.get(raw)
@@ -960,6 +974,9 @@ class AudioCaptureMixer(
         micRecord = null
         mediaAudioFifo.clear()
         activeSfxClips.clear()
+        synchronized(decodedSfxCache) {
+            decodedSfxCache.clear()
+        }
         gameDelayBuffer.reset()
         micDelayBuffer.reset()
         gamePeakDb = -60f

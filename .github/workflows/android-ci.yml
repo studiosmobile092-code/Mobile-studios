@@ -36,11 +36,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - name: Set up Android SDK 36
         uses: android-actions/setup-android@v3
@@ -153,11 +153,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - name: Set up Android SDK, NDK & CMake
         uses: android-actions/setup-android@v3
@@ -167,6 +167,10 @@ jobs:
             build-tools;36.0.0
             ndk;27.2.12479018
             cmake;3.31.6
+
+      - name: Put SDK CMake 3.31.6 on PATH
+        shell: bash
+        run: echo "${ANDROID_SDK_ROOT}/cmake/3.31.6/bin" >> "$GITHUB_PATH"
 
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4

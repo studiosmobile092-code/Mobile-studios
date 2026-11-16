@@ -352,6 +352,9 @@ class SessionController(private val context: Context) {
             },
             onStreamError = { reason -> handleStreamDisconnect(reason) },
             onRecordingFinalized = { published ->
+                recordStartedAtMs = 0L
+                recordTotalPausedMs = 0L
+                recordPausedAtMs = 0L
                 _uiState.update { cur ->
                     cur.copy(
                         recordingPhase = RecordingPhase.IDLE,
@@ -362,6 +365,9 @@ class SessionController(private val context: Context) {
                 logEvent("Recording finalized: ${published.fileName} (${published.bytesSize / 1024} KB)")
             },
             onRecordingError = { reason ->
+                recordStartedAtMs = 0L
+                recordTotalPausedMs = 0L
+                recordPausedAtMs = 0L
                 _uiState.update { it.copy(recordingPhase = RecordingPhase.ERROR, statusMessage = reason) }
                 logEvent("Recording error: $reason")
             }
@@ -462,7 +468,15 @@ class SessionController(private val context: Context) {
     }
 
     fun setMultiTrackAudioEnabled(enabled: Boolean) {
-        updateVideoConfig(_uiState.value.videoConfig.copy(multiTrackAudioEnabled = enabled))
+        val cur = _uiState.value
+        val sessionActive = cur.sessionPhase != SessionPhase.IDLE && cur.sessionPhase != SessionPhase.ERROR
+        if (sessionActive) {
+            _uiState.update {
+                it.copy(statusMessage = "Stop capture before toggling multi-track audio")
+            }
+            return
+        }
+        updateVideoConfig(cur.videoConfig.copy(multiTrackAudioEnabled = enabled))
     }
 
     fun startStreaming() {
@@ -2477,20 +2491,27 @@ class SessionController(private val context: Context) {
             twDropped = pipe?.getNamedDroppedFrames("twitch") ?: 0L
         )
 
-        val updatedState = _uiState.value.copy(
-            telemetry = snapshot,
-            audioChannels = liveChannels,
-            adaptiveQuality = adaptiveOutcome.state,
-            dualDestination = updatedDual,
-            abrTargetBitrateKbps = dynamicTargetBitrateKbps.takeIf { it > 0 } ?: cur.videoConfig.videoBitrateKbps,
-            replayBuffer = _uiState.value.replayBuffer.copy(
-                bufferedSeconds = replayStats?.bufferedSeconds ?: 0f,
-                bufferedKb = replayStats?.bufferedKb ?: 0L
-            ),
-            speakerMicEchoDetected = mixer?.isSpeakerMicFeedbackRisk() == true
-        )
-        _uiState.value = updatedState
-        diagnosticsExporter.appendTelemetrySample(updatedState)
+        val nextReplayBufferedSec = replayStats?.bufferedSeconds ?: 0f
+        val nextReplayBufferedKb = replayStats?.bufferedKb ?: 0L
+        val nextAbrBitrate = dynamicTargetBitrateKbps.takeIf { it > 0 } ?: cur.videoConfig.videoBitrateKbps
+        val echoRisk = mixer?.isSpeakerMicFeedbackRisk() == true
+
+        var committedState = _uiState.value
+        _uiState.update { latest ->
+            latest.copy(
+                telemetry = snapshot,
+                audioChannels = liveChannels,
+                adaptiveQuality = adaptiveOutcome.state,
+                dualDestination = updatedDual,
+                abrTargetBitrateKbps = nextAbrBitrate,
+                replayBuffer = latest.replayBuffer.copy(
+                    bufferedSeconds = nextReplayBufferedSec,
+                    bufferedKb = nextReplayBufferedKb
+                ),
+                speakerMicEchoDetected = echoRisk
+            ).also { committedState = it }
+        }
+        diagnosticsExporter.appendTelemetrySample(committedState)
     }
 
     private fun persistCurrentSettings() {

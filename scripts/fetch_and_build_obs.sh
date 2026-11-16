@@ -15,9 +15,15 @@ JNILIBS_DIR="$CPP_DIR/jniLibs/arm64-v8a"
 OBS_COMMIT="57bfcf10a"
 JANSSON_TAG="v2.14"
 SIMDE_TAG="v0.8.2"
+UTHASH_TAG="v2.3.0"
 FFMPEG_TAG="n6.1.2"
 ANDROID_ABI="arm64-v8a"
 ANDROID_PLATFORM="29"
+
+if [ -n "${ANDROID_SDK_ROOT:-}" ] && [ -d "$ANDROID_SDK_ROOT/cmake/3.31.6/bin" ]; then
+  export PATH="$ANDROID_SDK_ROOT/cmake/3.31.6/bin:$PATH"
+fi
+export CMAKE_POLICY_VERSION_MINIMUM=3.5
 
 if [ -z "${ANDROID_NDK_HOME:-}" ]; then
   echo "ERROR: ANDROID_NDK_HOME is not set. Point it to NDK 27+."
@@ -45,6 +51,7 @@ if [ ! -f "$DEPS_PREFIX/lib/libjansson.a" ]; then
     git clone --depth 1 --branch "$JANSSON_TAG" https://github.com/akheron/jansson.git "$DEPS_SRC_DIR/jansson"
   fi
   cmake -S "$DEPS_SRC_DIR/jansson" -B "$DEPS_SRC_DIR/build-jansson" -G Ninja \
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
     -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
     -DANDROID_ABI="$ANDROID_ABI" \
     -DANDROID_PLATFORM="android-$ANDROID_PLATFORM" \
@@ -57,13 +64,21 @@ if [ ! -f "$DEPS_PREFIX/lib/libjansson.a" ]; then
   cmake --build "$DEPS_SRC_DIR/build-jansson" --target install --parallel "$(nproc)"
 fi
 
-# 2. Stage header-only SIMDe for ARM64 SIMD compatibility
+# 2. Stage header-only SIMDe & Uthash
 if [ ! -d "$DEPS_PREFIX/include/simde" ]; then
   echo "Staging SIMDe $SIMDE_TAG headers..."
   if [ ! -d "$DEPS_SRC_DIR/simde/.git" ]; then
     git clone --depth 1 --branch "$SIMDE_TAG" https://github.com/simd-everywhere/simde.git "$DEPS_SRC_DIR/simde"
   fi
   cp -R "$DEPS_SRC_DIR/simde/simde" "$DEPS_PREFIX/include/"
+fi
+
+if [ ! -f "$DEPS_PREFIX/include/uthash.h" ]; then
+  echo "Staging Uthash $UTHASH_TAG headers..."
+  if [ ! -d "$DEPS_SRC_DIR/uthash/.git" ]; then
+    git clone --depth 1 --branch "$UTHASH_TAG" https://github.com/troydhanson/uthash.git "$DEPS_SRC_DIR/uthash"
+  fi
+  cp "$DEPS_SRC_DIR/uthash/src/"*.h "$DEPS_PREFIX/include/"
 fi
 
 # 3. Cross-compile minimal static FFmpeg (avutil/avcodec/avformat/swscale/swresample)
@@ -115,6 +130,17 @@ fi
 pushd "$THIRD_PARTY_DIR/obs-studio" >/dev/null
 git fetch --depth 1 origin "$OBS_COMMIT" || true
 git checkout "$OBS_COMMIT"
+# Allow obs-studio osconfig.cmake to treat Android NDK as POSIX/Linux-like host target cleanly
+python3 - <<'PYEOF'
+from pathlib import Path
+p = Path("cmake/common/osconfig.cmake")
+if p.exists():
+    txt = p.read_text(encoding="utf-8")
+    if "OS_ANDROID" not in txt:
+        txt = txt.replace('CMAKE_SYSTEM_NAME MATCHES "Linux|FreeBSD|OpenBSD"', 'CMAKE_SYSTEM_NAME MATCHES "Linux|FreeBSD|OpenBSD|Android"')
+        txt += '\nif(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android")\n  set(OS_LINUX ON)\n  set(OS_ANDROID ON)\n  set(OS_POSIX ON)\nendif()\n'
+        p.write_text(txt, encoding="utf-8")
+PYEOF
 popd >/dev/null
 
 echo "Building libobs ($ANDROID_ABI) via Android NDK toolchain..."
@@ -123,18 +149,26 @@ export PKG_CONFIG_LIBDIR="$DEPS_PREFIX/lib/pkgconfig"
 
 cmake -S "$THIRD_PARTY_DIR/obs-studio" -B "$OBS_BUILD_DIR" \
   -G Ninja \
+  -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
   -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
   -DANDROID_ABI="$ANDROID_ABI" \
   -DANDROID_PLATFORM="android-$ANDROID_PLATFORM" \
   -DANDROID_STL=c++_shared \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH="$DEPS_PREFIX" \
-  -DCMAKE_FIND_ROOT_PATH="$DEPS_PREFIX" \
+  -DCMAKE_FIND_ROOT_PATH="$DEPS_PREFIX;$SYSROOT" \
+  -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH \
+  -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH \
+  -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \
+  -DUthash_INCLUDE_DIR="$DEPS_PREFIX/include" \
+  -DFFmpeg_INCLUDE_DIRS="$DEPS_PREFIX/include" \
   -DCMAKE_C_FLAGS="-I$DEPS_PREFIX/include -fPIC" \
   -DCMAKE_CXX_FLAGS="-I$DEPS_PREFIX/include -fPIC" \
+  -DBUILD_SHARED_LIBS=ON \
   -DENABLE_UI=OFF \
   -DENABLE_SCRIPTING=OFF \
   -DENABLE_PLUGINS=OFF \
+  -DENABLE_X11=OFF \
   -DENABLE_WAYLAND=OFF \
   -DENABLE_PULSEAUDIO=OFF \
   -DENABLE_PIPEWIRE=OFF \
@@ -142,11 +176,20 @@ cmake -S "$THIRD_PARTY_DIR/obs-studio" -B "$OBS_BUILD_DIR" \
   -DENABLE_JACK=OFF \
   -DENABLE_SNDIO=OFF \
   -DENABLE_V4L2=OFF \
+  -DENABLE_FREETYPE=OFF \
+  -DENABLE_FONTCONFIG=OFF \
+  -DENABLE_LIBFDK=OFF \
+  -DENABLE_SPEEXDSP=OFF \
+  -DENABLE_RNNOISE=OFF \
+  -DENABLE_RTMPS=OFF \
+  -DENABLE_GIO=OFF \
+  -DENABLE_DBUS=OFF \
   -DENABLE_BROWSER=OFF \
   -DENABLE_VST=OFF \
   -DENABLE_VIRTUALCAM=OFF \
   -DENABLE_WEBRTC=OFF \
   -DENABLE_AJA=OFF \
+  -DENABLE_DECKLINK=OFF \
   -DENABLE_NEW_MPEGTS_OUTPUT=OFF \
   -DENABLE_QSV11=OFF \
   -DENABLE_VLC=OFF \

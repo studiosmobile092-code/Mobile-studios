@@ -179,6 +179,7 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
     private val heavyFiltersSuspendedRef = AtomicBoolean(false)
 
     private val textureCache = LinkedHashMap<String, CachedTexture>(24, 0.75f, true)
+    private val glIdScratch = IntArray(1)
     private var renderFrameCounter = 0L
 
     private var previewWidth = 0
@@ -205,11 +206,13 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
 
     private var adpfSession: PerformanceHintManager.Session? = null
     private var adpfLastTargetNs: Long = 0L
+    private var nextTickDeadlineMs: Long = 0L
 
     private val tickRunnable = object : Runnable {
         override fun run() {
             if (!running.get()) return
             val tickStartNs = SystemClock.elapsedRealtimeNanos()
+            val nowUptimeMs = SystemClock.uptimeMillis()
             renderTick(tickStartNs)
             val cfg = configRef.get()
             val framePeriodNs = 1_000_000_000L / max(1, cfg.fps)
@@ -229,8 +232,10 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
             if (elapsedNs > framePeriodNs * 2) {
                 renderSkippedCount.incrementAndGet()
             }
-            val delayMs = max(1L, (framePeriodNs - elapsedNs) / 1_000_000L)
-            glHandler?.postDelayed(this, delayMs)
+            val periodMs = (framePeriodNs / 1_000_000L).coerceAtLeast(1L)
+            val baseMs = if (nextTickDeadlineMs == 0L) nowUptimeMs else nextTickDeadlineMs
+            nextTickDeadlineMs = max(SystemClock.uptimeMillis() + 1L, baseMs + periodMs)
+            glHandler?.postAtTime(this, nextTickDeadlineMs)
         }
     }
 
@@ -432,6 +437,7 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
 
         val handler = glHandler
         val thread = glThread
+        nextTickDeadlineMs = 0L
         handler?.removeCallbacks(tickRunnable)
         handler?.post {
             releaseGlResources()
@@ -860,14 +866,18 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         val w = cfg.outputWidth.coerceIn(320, 1920)
         val h = cfg.outputHeight.coerceIn(180, 1080)
         if (screenshotFbo == 0 || screenshotW != w || screenshotH != h) {
-            if (screenshotFbo != 0) GLES30.glDeleteFramebuffers(1, intArrayOf(screenshotFbo), 0)
-            if (screenshotTex != 0) GLES30.glDeleteTextures(1, intArrayOf(screenshotTex), 0)
-            val fbos = IntArray(1)
-            val texs = IntArray(1)
-            GLES30.glGenFramebuffers(1, fbos, 0)
-            GLES30.glGenTextures(1, texs, 0)
-            screenshotFbo = fbos[0]
-            screenshotTex = texs[0]
+            if (screenshotFbo != 0) {
+                glIdScratch[0] = screenshotFbo
+                GLES30.glDeleteFramebuffers(1, glIdScratch, 0)
+            }
+            if (screenshotTex != 0) {
+                glIdScratch[0] = screenshotTex
+                GLES30.glDeleteTextures(1, glIdScratch, 0)
+            }
+            GLES30.glGenFramebuffers(1, glIdScratch, 0)
+            screenshotFbo = glIdScratch[0]
+            GLES30.glGenTextures(1, glIdScratch, 0)
+            screenshotTex = glIdScratch[0]
             screenshotW = w
             screenshotH = h
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, screenshotTex)
@@ -1148,8 +1158,12 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
 
     private fun drawTimerSource(src: SourceModel, globalAlpha: Float, xOffsetNdc: Float) {
         val nowMs = System.currentTimeMillis()
-        val text = DynamicSourceRenderer.computeTimerDisplayString(src, nowMs)
-        val ver = text.hashCode().toLong() * 31L + (if (src.timerRunning) 1L else 0L) + (if (src.timerCountDown) 2L else 0L)
+        val displaySec = DynamicSourceRenderer.computeTimerDisplaySeconds(src, nowMs)
+        var ver = displaySec.toLong()
+        ver = ver * 31L + (if (src.timerRunning) 1L else 0L)
+        ver = ver * 31L + (if (src.timerCountDown) 2L else 0L)
+        ver = ver * 31L + src.textColorArgb
+        ver = ver * 31L + src.textBgColorArgb
         val key = "timer|${src.id}"
         val existing = textureCache[key]
         val tex = if (existing != null && existing.version == ver) {
@@ -1163,7 +1177,10 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
     }
 
     private fun drawScoreboardSource(src: SourceModel, globalAlpha: Float, xOffsetNdc: Float) {
-        val ver = ("${src.scoreHomeName}|${src.scoreAwayName}|${src.scoreHome}|${src.scoreAway}").hashCode().toLong()
+        var ver = src.scoreHomeName.hashCode().toLong()
+        ver = ver * 31L + src.scoreAwayName.hashCode().toLong()
+        ver = ver * 31L + src.scoreHome.toLong()
+        ver = ver * 31L + src.scoreAway.toLong()
         val key = "score|${src.id}"
         val existing = textureCache[key]
         val tex = if (existing != null && existing.version == ver) {
@@ -1192,7 +1209,10 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
     }
 
     private fun drawGoalBarSource(src: SourceModel, globalAlpha: Float, xOffsetNdc: Float) {
-        val ver = ("${src.goalTitle}|${src.goalCurrent}|${src.goalTarget}|${src.goalAccentColorArgb}").hashCode().toLong()
+        var ver = src.goalTitle.hashCode().toLong()
+        ver = ver * 31L + src.goalCurrent.toLong()
+        ver = ver * 31L + src.goalTarget.toLong()
+        ver = ver * 31L + src.goalAccentColorArgb
         val key = "goal|${src.id}"
         val existing = textureCache[key]
         val tex = if (existing != null && existing.version == ver) {
@@ -1222,8 +1242,12 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
     }
 
     private fun drawTextSource(src: SourceModel, globalAlpha: Float, xOffsetNdc: Float) {
-        val key = "txt|${src.id}|${src.textContent}|${src.textColorArgb}|${src.textBgColorArgb}|${src.textSizeSp}"
-        val cached = getOrRenderTextTexture(key, src) ?: return
+        var ver = src.textContent.hashCode().toLong()
+        ver = ver * 31L + src.textColorArgb
+        ver = ver * 31L + src.textBgColorArgb
+        ver = ver * 31L + src.textSizeSp.toBits().toLong()
+        val key = "txt|${src.id}"
+        val cached = getOrRenderTextTexture(key, ver, src)
         draw2dTexture(src, cached, globalAlpha, xOffsetNdc)
     }
 
@@ -1441,10 +1465,11 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         return uploadBitmapToCache(key, bmp, version = 1L)
     }
 
-    private fun getOrRenderTextTexture(key: String, src: SourceModel): CachedTexture? {
-        textureCache[key]?.let {
-            it.lastUsedFrame = renderFrameCounter
-            return it
+    private fun getOrRenderTextTexture(key: String, version: Long, src: SourceModel): CachedTexture {
+        val existing = textureCache[key]
+        if (existing != null && existing.version == version) {
+            existing.lastUsedFrame = renderFrameCounter
+            return existing
         }
         val text = src.textContent.ifBlank { "Mobile Labs" }
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -1467,7 +1492,7 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
             canvas.drawText(line, pad.toFloat(), y, paint)
             y += lineHeight
         }
-        return uploadBitmapToCache(key, bmp, version = 1L)
+        return updateOrCreateDynamicTexture(key, version, bmp, recycleAfterUpload = true)
     }
 
     private fun updateOrCreateDynamicTexture(
@@ -1491,8 +1516,7 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
             if (recycleAfterUpload) bmp.recycle()
             return existing
         }
-        val uploaded = uploadBitmapToCache(key, bmp, version = version, recycleBitmap = recycleAfterUpload)
-        return uploaded
+        return uploadBitmapToCache(key, bmp, version = version, recycleBitmap = recycleAfterUpload)
     }
 
     private fun uploadBitmapToCache(
@@ -1502,9 +1526,8 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         recycleBitmap: Boolean = true
     ): CachedTexture {
         evictIfOverCapacity(maxEntries = 22)
-        val ids = IntArray(1)
-        GLES30.glGenTextures(1, ids, 0)
-        val texId = ids[0]
+        GLES30.glGenTextures(1, glIdScratch, 0)
+        val texId = glIdScratch[0]
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, texId)
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
         GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
@@ -1532,7 +1555,8 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
             val oldestKey = textureCache.keys.firstOrNull() ?: break
             val removed = textureCache.remove(oldestKey)
             if (removed != null) {
-                GLES30.glDeleteTextures(1, intArrayOf(removed.texId), 0)
+                glIdScratch[0] = removed.texId
+                GLES30.glDeleteTextures(1, glIdScratch, 0)
             }
         }
     }
@@ -1542,7 +1566,8 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         while (it.hasNext()) {
             val entry = it.next().value
             if (renderFrameCounter - entry.lastUsedFrame > 180L) {
-                GLES30.glDeleteTextures(1, intArrayOf(entry.texId), 0)
+                glIdScratch[0] = entry.texId
+                GLES30.glDeleteTextures(1, glIdScratch, 0)
                 it.remove()
             }
         }
@@ -1577,13 +1602,20 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         mediaInputSurface = null
         mediaSurfaceTexture = null
 
-        if (screenshotFbo != 0) GLES30.glDeleteFramebuffers(1, intArrayOf(screenshotFbo), 0)
-        if (screenshotTex != 0) GLES30.glDeleteTextures(1, intArrayOf(screenshotTex), 0)
+        if (screenshotFbo != 0) {
+            glIdScratch[0] = screenshotFbo
+            GLES30.glDeleteFramebuffers(1, glIdScratch, 0)
+        }
+        if (screenshotTex != 0) {
+            glIdScratch[0] = screenshotTex
+            GLES30.glDeleteTextures(1, glIdScratch, 0)
+        }
         screenshotFbo = 0
         screenshotTex = 0
 
         textureCache.values.forEach { entry ->
-            GLES30.glDeleteTextures(1, intArrayOf(entry.texId), 0)
+            glIdScratch[0] = entry.texId
+            GLES30.glDeleteTextures(1, glIdScratch, 0)
         }
         textureCache.clear()
 

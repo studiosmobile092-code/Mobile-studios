@@ -6,6 +6,7 @@ import com.example.mobilelabs.engine.SceneEditingHelper
 import com.example.mobilelabs.media.AudioDelayRingBuffer
 import com.example.mobilelabs.media.AudioDspProcessor
 import com.example.mobilelabs.media.FlvH264Helper
+import com.example.mobilelabs.media.MediaSourceDecoder
 import com.example.mobilelabs.media.RecordingPtsRebaser
 import com.example.mobilelabs.media.ReplayGopRingBuffer
 import com.example.mobilelabs.media.RtmpProtocolParser
@@ -277,5 +278,74 @@ class MobileLabsPipelineRegressionTest {
             SourceType.CHAT_OVERLAY,
             SourceType.DRAWING_LAYER
         )))
+    }
+
+    @Test
+    fun `RecordingPtsRebaser rejects audio before initial video IDR and across reset`() {
+        val rebaser = RecordingPtsRebaser()
+        // Audio arriving before the initial video keyframe must be rejected
+        assertEquals(-1L, rebaser.filterAndRebase(isVideo = false, isKey = false, rawPtsUs = 500L))
+        // Non-key video also rejected
+        assertEquals(-1L, rebaser.filterAndRebase(isVideo = true, isKey = false, rawPtsUs = 900L))
+        // Initial video IDR latches basePtsUs
+        assertEquals(0L, rebaser.filterAndRebase(isVideo = true, isKey = true, rawPtsUs = 1_000L))
+        // Subsequent audio and video rebase cleanly against the same basePtsUs
+        assertEquals(21_333L, rebaser.filterAndRebase(isVideo = false, isKey = false, rawPtsUs = 22_333L))
+
+        // After reset(), audio must again wait for initial video IDR
+        rebaser.reset()
+        assertEquals(-1L, rebaser.filterAndRebase(isVideo = false, isKey = false, rawPtsUs = 50_000L))
+        assertEquals(0L, rebaser.filterAndRebase(isVideo = true, isKey = true, rawPtsUs = 60_000L))
+    }
+
+    @Test
+    fun `RecordingPtsRebaser keeps audio and video synchronized across pause and resume`() {
+        val rebaser = RecordingPtsRebaser()
+        assertEquals(0L, rebaser.filterAndRebase(isVideo = true, isKey = true, rawPtsUs = 10_000L))
+        assertEquals(20_000L, rebaser.filterAndRebase(isVideo = false, isKey = false, rawPtsUs = 30_000L))
+
+        rebaser.pause(currentRawPtsUs = 40_000L)
+        assertEquals(-1L, rebaser.filterAndRebase(isVideo = false, isKey = false, rawPtsUs = 200_000L))
+
+        rebaser.resume(currentRawPtsUs = 1_040_000L) // paused 1_000_000 us
+        // Audio arriving before the post-resume video keyframe is skipped so A/V stays locked
+        assertEquals(-1L, rebaser.filterAndRebase(isVideo = false, isKey = false, rawPtsUs = 1_045_000L))
+        val vPost = rebaser.filterAndRebase(isVideo = true, isKey = true, rawPtsUs = 1_050_000L)
+        val aPost = rebaser.filterAndRebase(isVideo = false, isKey = false, rawPtsUs = 1_060_000L)
+        assertEquals(40_000L, vPost)
+        assertEquals(50_000L, aPost)
+    }
+
+    @Test
+    fun `ReplayGopRingBuffer strictly enforces maxBytes cap while preserving latest keyframe`() {
+        val ring = ReplayGopRingBuffer(maxBytes = 250L)
+        ring.configure(enabled = true, durationSec = 60)
+
+        // Push 4 GOPs of 100 bytes each (total 400 > maxBytes 250)
+        for (i in 0 until 4) {
+            val ptsUs = i * 1_000_000L
+            ring.pushSample(isVideo = true, isKey = true, ptsUs = ptsUs, flags = 1, payload = ByteArray(60) { i.toByte() })
+            ring.pushSample(isVideo = true, isKey = false, ptsUs = ptsUs + 16_000L, flags = 0, payload = ByteArray(40) { i.toByte() })
+        }
+
+        val stats = ring.stats()
+        assertTrue("Expected <= 1 KB in ring buffer, got ${stats.bufferedKb}", stats.bufferedKb <= 1L)
+        val clip = ring.extractAlignedClipSamples()
+        assertTrue(clip.isNotEmpty())
+        assertTrue(clip.first().isVideo && clip.first().isKey)
+        val totalClipBytes = clip.sumOf { it.data.size.toLong() }
+        assertTrue("Expected total clip bytes <= 250, got $totalClipBytes", totalClipBytes <= 250L)
+    }
+
+    @Test
+    fun `MediaSourceDecoder resampleTo48kStereo duplicates mono and upsamples 44100Hz`() {
+        val mono48k = shortArrayOf(1000, -2000, 3000)
+        val stereoFromMono = MediaSourceDecoder.resampleTo48kStereo(mono48k, mono48k.size, srcRate = 48000, srcChannels = 1)
+        assertArrayEquals(shortArrayOf(1000, 1000, -2000, -2000, 3000, 3000), stereoFromMono)
+
+        val mono44k = ShortArray(441) { i -> (i * 10).toShort() }
+        val upsampled = MediaSourceDecoder.resampleTo48kStereo(mono44k, mono44k.size, srcRate = 44100, srcChannels = 1)
+        assertEquals(480 * 2, upsampled.size)
+        assertEquals(upsampled[0], upsampled[1])
     }
 }

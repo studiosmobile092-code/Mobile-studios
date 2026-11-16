@@ -7,10 +7,7 @@ import com.example.mobilelabs.model.PublishedRecording
 import com.example.mobilelabs.persistence.SceneCollectionRepository
 import java.io.File
 import java.nio.ByteBuffer
-import java.text.SimpleDateFormat
 import java.util.ArrayDeque
-import java.util.Date
-import java.util.Locale
 import kotlin.math.max
 
 /**
@@ -106,11 +103,6 @@ class ReplayGopRingBuffer(
                 ) {
                     break
                 }
-                if (head.isVideo && head.isKey &&
-                    (packets.last().ptsUs - head.ptsUs) <= maxWindowUs
-                ) {
-                    break
-                }
                 val removed = packets.removeFirst()
                 totalBytes -= removed.data.size
             }
@@ -139,13 +131,7 @@ object ReplayClipMuxer {
         publishFn: (File) -> String?
     ): PublishedRecording? {
         if (samples.isEmpty() || videoFormat == null) return null
-        val stamp = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
-        var outFile = File(repository.recordingsDir, "Replay_$stamp.mp4")
-        var idx = 1
-        while (outFile.exists()) {
-            outFile = File(repository.recordingsDir, "Replay_${stamp}_$idx.mp4")
-            idx++
-        }
+        val outFile = MediaFileAllocator.allocateTimestampedFile(repository.recordingsDir, "Replay", "mp4")
 
         val basePtsUs = samples.first().ptsUs
         val lastPtsUs = samples.last().ptsUs

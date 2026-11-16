@@ -39,18 +39,22 @@ import kotlin.math.min
  */
 object DynamicSourceRenderer {
 
-    fun computeTimerDisplayString(src: SourceModel, nowMs: Long = System.currentTimeMillis()): String {
+    fun computeTimerDisplaySeconds(src: SourceModel, nowMs: Long = System.currentTimeMillis()): Int {
         val activeElapsed = if (src.timerRunning && src.timerStartedAtMs > 0L) {
             src.timerElapsedBeforeMs + (nowMs - src.timerStartedAtMs).coerceAtLeast(0L)
         } else {
             src.timerElapsedBeforeMs
         }
         val elapsedSec = (activeElapsed / 1000L).toInt()
-        val displaySec = if (src.timerCountDown) {
+        return if (src.timerCountDown) {
             (src.timerTargetSec - elapsedSec).coerceAtLeast(0)
         } else {
             elapsedSec.coerceAtLeast(0)
         }
+    }
+
+    fun computeTimerDisplayString(src: SourceModel, nowMs: Long = System.currentTimeMillis()): String {
+        val displaySec = computeTimerDisplaySeconds(src, nowMs)
         val hrs = displaySec / 3600
         val mins = (displaySec % 3600) / 60
         val secs = displaySec % 60

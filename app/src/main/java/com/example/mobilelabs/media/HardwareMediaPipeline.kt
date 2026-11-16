@@ -10,6 +10,7 @@ import android.media.MediaMuxer
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.SystemClock
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.view.Surface
@@ -23,9 +24,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.nio.ByteBuffer
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -80,7 +79,7 @@ class RecordingPtsRebaser {
             }
         }
         if (basePtsUs < 0L) {
-            if (isVideo && !isKey) return -1L
+            if (!isVideo || !isKey) return -1L
             basePtsUs = rawPtsUs
         }
         return (rawPtsUs - basePtsUs - totalPausedUs).coerceAtLeast(0L)
@@ -141,8 +140,8 @@ class HardwareMediaPipeline(
     private var segmentStartMs = 0L
     private val recordBytesWritten = AtomicLong(0L)
     private val muxerLock = Any()
+    private val muxerSampleInfo = MediaCodec.BufferInfo()
     private val ptsRebaser = RecordingPtsRebaser()
-    @Volatile private var lastRawPtsUs = 0L
     private var lastMuxerVideoPtsUs = -1L
     private var lastMuxerAudioPtsUs = -1L
     private var lastMuxerMicPtsUs = -1L
@@ -221,6 +220,12 @@ class HardwareMediaPipeline(
             recordingActive.set(true)
             target
         } catch (t: Throwable) {
+            synchronized(muxerLock) {
+                runCatching { muxer?.release() }
+                muxer = null
+                currentRecordFile = null
+            }
+            runCatching { target.delete() }
             onRecordingError("Muxer start failed: ${t.message}")
             null
         }
@@ -228,15 +233,17 @@ class HardwareMediaPipeline(
 
     fun pauseRecording() {
         if (!recordingActive.get()) return
+        val nowUs = SystemClock.elapsedRealtimeNanos() / 1000L
         synchronized(muxerLock) {
-            ptsRebaser.pause(lastRawPtsUs)
+            ptsRebaser.pause(nowUs)
         }
     }
 
     fun resumeRecording() {
         if (!recordingActive.get()) return
+        val nowUs = SystemClock.elapsedRealtimeNanos() / 1000L
         synchronized(muxerLock) {
-            ptsRebaser.resume(lastRawPtsUs)
+            ptsRebaser.resume(nowUs)
         }
         requestKeyFrame()
     }
@@ -264,8 +271,11 @@ class HardwareMediaPipeline(
             ptsRebaser.reset()
         }
         repository.clearActiveRecordingMarker()
-        if (file != null && file.exists() && file.length() > 1024L) {
+        if (file != null && file.exists() && file.length() > 1024L && repository.verifyMediaPlayable(file)) {
             finalizeAndPublishFile(file, durationSec)
+        } else {
+            runCatching { file?.delete() }
+            onRecordingError("Recording too short — no playable frames captured")
         }
     }
 
@@ -286,7 +296,7 @@ class HardwareMediaPipeline(
 
     fun publishBitmapScreenshot(bitmap: Bitmap): String? {
         return runCatching {
-            val stamp = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
+            val stamp = MediaFileAllocator.currentTimestamp()
             val fileName = "MobileLabs_Shot_$stamp.png"
             val resolver = context.contentResolver
             val values = ContentValues().apply {
@@ -420,11 +430,12 @@ class HardwareMediaPipeline(
             if (inIdx >= 0) {
                 val buf = codec.getInputBuffer(inIdx) ?: return
                 buf.clear()
-                val bytesNeeded = sampleCount * 2
-                val maxWritable = minOf(bytesNeeded, buf.remaining())
+                buf.order(ByteOrder.nativeOrder())
+                val maxWritable = minOf(sampleCount * 2, buf.remaining())
                 val shortsToWrite = maxWritable / 2
-                for (i in 0 until shortsToWrite) {
-                    buf.putShort(pcm16Stereo[i])
+                if (shortsToWrite > 0) {
+                    buf.asShortBuffer().put(pcm16Stereo, 0, shortsToWrite)
+                    buf.position(shortsToWrite * 2)
                 }
                 codec.queueInputBuffer(inIdx, 0, shortsToWrite * 2, ptsUs, 0)
             }
@@ -433,7 +444,9 @@ class HardwareMediaPipeline(
 
     fun stopEncoders() {
         stopAllStreams()
-        stopRecording()
+        if (recordingActive.get()) {
+            stopRecording()
+        }
         replayRingBuffer.clear()
 
         videoRunning.set(false)
@@ -459,8 +472,19 @@ class HardwareMediaPipeline(
         audioEncoder = null
         micAudioEncoder = null
         gameAudioEncoder = null
+        currentVideoFormat = null
+        currentAudioFormat = null
         currentMicAudioFormat = null
         currentGameAudioFormat = null
+        videoConfigBytes = null
+        audioConfigBytes = null
+        lastMuxerVideoPtsUs = -1L
+        lastMuxerAudioPtsUs = -1L
+        lastMuxerMicPtsUs = -1L
+        lastMuxerGamePtsUs = -1L
+        bytesInWindow = 0L
+        lastBitrateSampleMs = 0L
+        currentBitrateKbps.set(0)
     }
 
     fun getEncoderQueueDepth(): Int = namedSenders.values.maxOfOrNull { it.queueDepth() } ?: 0
@@ -473,16 +497,8 @@ class HardwareMediaPipeline(
     fun getActualBitrateKbps(): Int = currentBitrateKbps.get()
     fun getRecordingBytesWritten(): Long = recordBytesWritten.get()
 
-    private fun allocateRecordingFile(): File {
-        val stamp = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
-        var target = File(repository.recordingsDir, "MobileLabs_$stamp.mp4")
-        var suffix = 1
-        while (target.exists()) {
-            target = File(repository.recordingsDir, "MobileLabs_${stamp}_$suffix.mp4")
-            suffix++
-        }
-        return target
-    }
+    private fun allocateRecordingFile(): File =
+        MediaFileAllocator.allocateTimestampedFile(repository.recordingsDir, "MobileLabs", "mp4")
 
     private fun finalizeAndPublishFile(file: File, durationSec: Long) {
         val sizeBytes = file.length()
@@ -587,7 +603,6 @@ class HardwareMediaPipeline(
                                 lastBitrateSampleMs = now
                             }
 
-                            lastRawPtsUs = info.presentationTimeUs
                             val isKey = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
 
                             if (isKey && recordingActive.get() && !ptsRebaser.isPaused &&
@@ -856,16 +871,26 @@ class HardwareMediaPipeline(
                 }
             }
 
-            val rebasedInfo = MediaCodec.BufferInfo().apply {
-                set(0, rawBytes.size, rebasedPts, info.flags)
-            }
-            runCatching {
-                m.writeSampleData(track, ByteBuffer.wrap(rawBytes), rebasedInfo)
+            muxerSampleInfo.set(0, rawBytes.size, rebasedPts, info.flags)
+            val writeOk = runCatching {
+                m.writeSampleData(track, ByteBuffer.wrap(rawBytes), muxerSampleInfo)
                 recordBytesWritten.addAndGet(rawBytes.size.toLong())
             }.onFailure { err ->
+                recordingActive.set(false)
+                val failedFile = currentRecordFile
+                runCatching { if (muxerStarted) m.stop() }
+                runCatching { m.release() }
+                muxer = null
+                muxerStarted = false
+                currentRecordFile = null
+                ptsRebaser.reset()
+                repository.clearActiveRecordingMarker()
+                if (failedFile != null && failedFile.exists() && failedFile.length() <= 1024L) {
+                    runCatching { failedFile.delete() }
+                }
                 onRecordingError("Recording write failed: ${err.message}")
-                stopRecording()
-            }
+            }.isSuccess
+            if (!writeOk) return
         }
     }
 

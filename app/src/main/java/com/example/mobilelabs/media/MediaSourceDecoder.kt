@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.SystemClock
 import android.view.Surface
 import java.io.File
+import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
 
@@ -250,6 +251,7 @@ class MediaSourceDecoder(
                         }
                         outBuf.position(info.offset)
                         outBuf.limit(info.offset + info.size)
+                        outBuf.order(ByteOrder.nativeOrder())
                         val shortView = outBuf.asShortBuffer()
                         val rawCount = shortView.remaining()
                         val rawShorts = ShortArray(rawCount)

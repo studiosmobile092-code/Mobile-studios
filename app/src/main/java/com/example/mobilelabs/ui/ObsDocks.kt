@@ -662,6 +662,7 @@ private fun ControlsDock(
         sessionPhase == SessionPhase.RECONNECTING
     val isRecording = recordingPhase == RecordingPhase.RECORDING
     val isPaused = recordingPhase == RecordingPhase.PAUSED
+    val isFinalizing = recordingPhase == RecordingPhase.FINALIZING
     val isRecActive = isRecording || isPaused
 
     DockFrame(
@@ -724,9 +725,9 @@ private fun ControlsDock(
                 }
             } else {
                 ObsControlButton(
-                    label = "Start Recording",
-                    enabled = isArmedOrBeyond,
-                    bgColor = ObsControlBtn,
+                    label = if (isFinalizing) "Finalizing..." else "Start Recording",
+                    enabled = isArmedOrBeyond && !isFinalizing,
+                    bgColor = if (isFinalizing) StatusWarn.copy(alpha = 0.45f) else ObsControlBtn,
                     testTag = "record_toggle_button",
                     onClick = callbacks.onToggleRecord,
                     modifier = Modifier.weight(1f)

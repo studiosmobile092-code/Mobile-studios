@@ -277,6 +277,8 @@ class RtmpFlvSender(
     private var readerThread: Thread? = null
     private var socket: Socket? = null
     private val writeLock = Any()
+    private val flvVideoPrefix = ByteArray(5)
+    private val flvAudioPrefix = ByteArray(2)
     private val chunkSize = 4096
 
     fun start(videoSeqHeader: ByteArray?, audioSeqHeader: ByteArray?) {
@@ -654,22 +656,92 @@ class RtmpFlvSender(
         isKey: Boolean,
         isSeqHeader: Boolean
     ) {
-        val body = ByteArray(5 + payload.size)
-        body[0] = if (isKey) 0x17 else 0x27
-        body[1] = if (isSeqHeader) 0x00 else 0x01
-        body[2] = 0x00
-        body[3] = 0x00
-        body[4] = 0x00
-        System.arraycopy(payload, 0, body, 5, payload.size)
-        writeRtmpChunk(out, csid = 6, msgTypeId = 9, streamId = 1, ts = tsMs, payload = body)
+        flvVideoPrefix[0] = if (isKey) 0x17 else 0x27
+        flvVideoPrefix[1] = if (isSeqHeader) 0x00 else 0x01
+        flvVideoPrefix[2] = 0x00
+        flvVideoPrefix[3] = 0x00
+        flvVideoPrefix[4] = 0x00
+        writeRtmpChunkWithPrefix(
+            out = out,
+            csid = 6,
+            msgTypeId = 9,
+            streamId = 1,
+            ts = tsMs,
+            prefix = flvVideoPrefix,
+            prefixLen = 5,
+            payload = payload
+        )
     }
 
     private fun writeFlvAudioTag(out: DataOutputStream, payload: ByteArray, tsMs: Long, isSeqHeader: Boolean) {
-        val body = ByteArray(2 + payload.size)
-        body[0] = 0xAF.toByte()
-        body[1] = if (isSeqHeader) 0x00 else 0x01
-        System.arraycopy(payload, 0, body, 2, payload.size)
-        writeRtmpChunk(out, csid = 4, msgTypeId = 8, streamId = 1, ts = tsMs, payload = body)
+        flvAudioPrefix[0] = 0xAF.toByte()
+        flvAudioPrefix[1] = if (isSeqHeader) 0x00 else 0x01
+        writeRtmpChunkWithPrefix(
+            out = out,
+            csid = 4,
+            msgTypeId = 8,
+            streamId = 1,
+            ts = tsMs,
+            prefix = flvAudioPrefix,
+            prefixLen = 2,
+            payload = payload
+        )
+    }
+
+    private fun writeRtmpChunkWithPrefix(
+        out: DataOutputStream,
+        csid: Int,
+        msgTypeId: Int,
+        streamId: Int,
+        ts: Long,
+        prefix: ByteArray,
+        prefixLen: Int,
+        payload: ByteArray,
+        activeChunkSize: Int = chunkSize
+    ) {
+        val totalLen = prefixLen + payload.size
+        val extended = ts >= 0xFFFFFFL
+        val hdrTs = if (extended) 0xFFFFFFL else ts.coerceAtLeast(0L)
+        var offset = 0
+        var first = true
+        while (offset < totalLen) {
+            var remainingInChunk = minOf(activeChunkSize, totalLen - offset)
+            if (first) {
+                out.writeByte(csid and 0x3F)
+                out.writeByte(((hdrTs ushr 16) and 0xFF).toInt())
+                out.writeByte(((hdrTs ushr 8) and 0xFF).toInt())
+                out.writeByte((hdrTs and 0xFF).toInt())
+                out.writeByte((totalLen ushr 16) and 0xFF)
+                out.writeByte((totalLen ushr 8) and 0xFF)
+                out.writeByte(totalLen and 0xFF)
+                out.writeByte(msgTypeId)
+                out.writeByte(streamId and 0xFF)
+                out.writeByte((streamId ushr 8) and 0xFF)
+                out.writeByte((streamId ushr 16) and 0xFF)
+                out.writeByte((streamId ushr 24) and 0xFF)
+                if (extended) {
+                    writeInt32BE(out, ts)
+                }
+                first = false
+            } else {
+                out.writeByte(0xC0 or (csid and 0x3F))
+                if (extended) {
+                    writeInt32BE(out, ts)
+                }
+            }
+
+            if (offset < prefixLen) {
+                val takePrefix = minOf(remainingInChunk, prefixLen - offset)
+                out.write(prefix, offset, takePrefix)
+                offset += takePrefix
+                remainingInChunk -= takePrefix
+            }
+            if (remainingInChunk > 0) {
+                val payloadOff = offset - prefixLen
+                out.write(payload, payloadOff, remainingInChunk)
+                offset += remainingInChunk
+            }
+        }
     }
 
     private fun writeRtmpChunk(
