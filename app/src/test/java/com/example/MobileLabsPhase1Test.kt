@@ -21,7 +21,7 @@ import java.io.File
 import java.util.zip.ZipFile
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
+@Config(sdk = [36])
 class MobileLabsPhase1Test {
 
     @Test

@@ -35,7 +35,7 @@ import java.io.DataOutputStream
 import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
+@Config(sdk = [36])
 class MobileLabsPipelineRegressionTest {
 
     @Test

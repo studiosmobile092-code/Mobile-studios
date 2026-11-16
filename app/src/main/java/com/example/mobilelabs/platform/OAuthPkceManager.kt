@@ -58,7 +58,45 @@ class OAuthPkceManager(
     @Volatile
     private var pendingSession: PendingAuthSession? = null
 
-    fun hasPendingAuth(): Boolean = pendingSession != null
+    private val prefs by lazy {
+        context.getSharedPreferences("mobilelabs_oauth_pkce", Context.MODE_PRIVATE)
+    }
+
+    private fun savePendingSession(session: PendingAuthSession) {
+        pendingSession = session
+        runCatching {
+            val json = JSONObject()
+                .put("platform", session.platform.name)
+                .put("clientId", session.clientId)
+                .put("codeVerifier", session.codeVerifier)
+                .put("state", session.state)
+                .put("redirectUri", session.redirectUri)
+                .toString()
+            prefs.edit().putString("pending_pkce_session", json).apply()
+        }
+    }
+
+    private fun loadPendingSession(): PendingAuthSession? {
+        pendingSession?.let { return it }
+        return runCatching {
+            val raw = prefs.getString("pending_pkce_session", null) ?: return null
+            val j = JSONObject(raw)
+            PendingAuthSession(
+                platform = StreamingPlatform.valueOf(j.getString("platform")),
+                clientId = j.getString("clientId"),
+                codeVerifier = j.getString("codeVerifier"),
+                state = j.getString("state"),
+                redirectUri = j.getString("redirectUri")
+            ).also { pendingSession = it }
+        }.getOrNull()
+    }
+
+    private fun clearPendingSession() {
+        pendingSession = null
+        runCatching { prefs.edit().remove("pending_pkce_session").apply() }
+    }
+
+    fun hasPendingAuth(): Boolean = loadPendingSession() != null
 
     fun launchOAuthLogin(platform: StreamingPlatform, clientId: String): Result<Unit> {
         val trimmedId = clientId.trim()
@@ -74,12 +112,14 @@ class OAuthPkceManager(
         val state = "${platform.name.lowercase()}_${generateRandomHex(12)}"
         val redirectUri = redirectUriFor(platform)
 
-        pendingSession = PendingAuthSession(
-            platform = platform,
-            clientId = trimmedId,
-            codeVerifier = verifier,
-            state = state,
-            redirectUri = redirectUri
+        savePendingSession(
+            PendingAuthSession(
+                platform = platform,
+                clientId = trimmedId,
+                codeVerifier = verifier,
+                state = state,
+                redirectUri = redirectUri
+            )
         )
 
         val authUri = buildAuthorizationUri(
@@ -109,7 +149,7 @@ class OAuthPkceManager(
 
     suspend fun handleRedirectUri(uri: Uri): Pair<StreamingPlatform?, Result<TokenResult>>? =
         withContext(Dispatchers.IO) {
-            val session = pendingSession ?: return@withContext null
+            val session = loadPendingSession() ?: return@withContext null
             val incomingScheme = uri.scheme.orEmpty()
             val expectedUri = session.redirectUri.toUri()
             if (!incomingScheme.equals(expectedUri.scheme, ignoreCase = true)) {
@@ -117,7 +157,7 @@ class OAuthPkceManager(
             }
 
             // Clear pending session once matched so duplicate intents don't replay it
-            pendingSession = null
+            clearPendingSession()
 
             val error = uri.getQueryParameter("error") ?: fragmentParam(uri.fragment, "error")
             if (!error.isNullOrBlank()) {

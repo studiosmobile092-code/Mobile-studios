@@ -31,7 +31,7 @@ import java.io.File
 import java.util.zip.ZipFile
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
+@Config(sdk = [36])
 class MobileLabsPhase3Test {
 
     @Test
@@ -97,18 +97,20 @@ class MobileLabsPhase3Test {
     fun `M3_1 network ABR drops bitrate under congestion and recovers smoothly when clear`() {
         val baseKbps = 6000
         val steppedDown = AdaptiveQualityEngine.evaluateNetworkAbr(
-            currentBitrateKbps = baseKbps,
-            configuredBaseKbps = baseKbps,
+            baseBitrateKbps = baseKbps,
+            currentTargetKbps = baseKbps,
             congestionPressure = 0.85f,
-            dynamicEnabled = true
+            queueDepth = 40,
+            recentDropDelta = 1L
         )
         assertTrue("Expected bitrate reduction on congestion, got $steppedDown", steppedDown < baseKbps)
 
         val recovered = AdaptiveQualityEngine.evaluateNetworkAbr(
-            currentBitrateKbps = steppedDown,
-            configuredBaseKbps = baseKbps,
+            baseBitrateKbps = baseKbps,
+            currentTargetKbps = steppedDown,
             congestionPressure = 0.0f,
-            dynamicEnabled = true
+            queueDepth = 0,
+            recentDropDelta = 0L
         )
         assertTrue("Expected gradual recovery, got $recovered <= $steppedDown", recovered > steppedDown)
         assertTrue(recovered <= baseKbps)

@@ -347,6 +347,7 @@ object DynamicSourceRenderer {
         return bmp
     }
 
+    @Suppress("DEPRECATION")
     class AnimatedStickerHandle(
         private val movie: Movie?,
         private val animatedDrawable: AnimatedImageDrawable?,
