@@ -1,50 +1,94 @@
 # OBSmobile
 
-**OBS-style live streaming and local recording for Android tablets**, built with Kotlin + Jetpack Compose. Primary target: **Samsung Galaxy Tab A9+ (Android 16)**.
+**OBS-style live streaming and local recording for Android tablets.**  
+Primary target: **Samsung Galaxy Tab A9+ (Android 16)**.
 
-> **Status (honest):**  
-> The pure Android pipeline (MediaProjection + MediaCodec + GLES compositor + RTMP) is the main path.  
-> Full upstream `libobs` cross-compile for Android is **experimental and currently broken** in CI (CMake ECM / Linux path issues). The native job is optional and non-blocking.
+Built with Kotlin + Jetpack Compose. Pure Android media pipeline is the primary path.
 
-## What works today (main APK)
+---
 
-- Classic OBS-style dark workspace UI (Scenes, Sources, Audio Mixer, Transitions, Controls)
-- Screen capture (MediaProjection) + Camera2 facecam
-- Hardware H.264 + AAC encoding via MediaCodec
-- Local recording (MP4 / segmented)
-- RTMP/RTMPS streaming (dual destination support in code)
-- Adaptive quality engine, scene collections, stream-key encryption
+## Current Status (honest)
 
-## Known limitations
+| Area | Status |
+|------|--------|
+| Classic OBS-style dark UI (Scenes / Sources / Mixer / Transitions / Controls) | Working |
+| Screen capture (MediaProjection) | Working |
+| Camera2 facecam | Working |
+| Hardware H.264 + AAC (MediaCodec) | Working |
+| Local recording (MP4 / segmented) | Working (see notes) |
+| RTMP / RTMPS streaming | Working (primary + dual destination) |
+| Adaptive quality + thermal awareness | Implemented |
+| Stream-key encryption (Android Keystore) | Implemented |
+| Full upstream libobs NDK build | **Broken / experimental** (CMake ECM) — job is optional |
+| System / game audio capture | Partial — many apps block AudioPlaybackCapture |
 
-- Full `libobs` native library build fails in CI (see Phase 1 notes)
-- Some advanced OBS features are partial or UI-only
-- Thorough real-device stream testing still needed on Tab A9+
+---
 
-## Build APK & XAPK in GitHub Actions
+## Known Limitations
 
-1. Open the repository → **Actions** tab
-2. Select **OBSmobile Android CI** → **Run workflow** (or just push to `main`)
-3. Options:
-   - `build_variant`: `both` / `debug` / `release`
-   - `package_xapk`: `true` to also make `.xapk`
-   - `build_native_libobs`: `false` by default (set `true` only if you want to try the experimental native build)
-4. Download artifacts:
-   - `obsmobile-debug-apk-xapk`
-   - `obsmobile-release-apk-xapk`
-   - (optional) `obsmobile-libobs-arm64-v8a` if the native job succeeded
+1. **"Recording too short — no playable frames"**  
+   Happens if you stop recording before the first keyframe is encoded and written. Always wait at least 1–2 seconds after pressing Record before stopping. The pipeline already requests an IDR on start.
 
-## Local build
+2. **System / game audio silent**  
+   Android only allows capture of apps that opt in (`ALLOW_CAPTURE_BY_ALL`). Many games, Spotify, Netflix, YouTube, etc. block capture. This is a platform restriction, not a bug in OBSmobile. Mic capture still works.
 
+3. **libobs native library**  
+   The CI job that builds `libobs` for arm64-v8a currently fails (missing ECM / Linux CMake paths). It is disabled by default and marked `continue-on-error`. The pure Android path does **not** depend on it.
+
+4. **Scaling / tablet layout**  
+   Designed for 16:10 landscape (Tab A9+). Portrait shows a rotate prompt. Some dock layouts can still be tight on smaller tablets.
+
+5. **Real-device confidence**  
+   Code paths for RTMP handshake, keyframe handling, pause/resume PTS rebase, and dual destination exist and look solid, but end-to-end live streams on a physical Tab A9+ still need verification by you.
+
+---
+
+## How to build the single APK
+
+### GitHub Actions (recommended)
+1. Go to **Actions** → **OBSmobile Android CI**
+2. Run workflow (or just push to `main`)
+3. Leave `build_native_libobs` = **false**
+4. Download `obsmobile-debug-apk-xapk` or `obsmobile-release-apk-xapk`
+
+### Local
 ```bash
 bash scripts/build_wsl2.sh
-# Optional experimental native build:
-export ANDROID_NDK_HOME=/path/to/android-ndk
-BUILD_LIBOBS=1 bash scripts/build_wsl2.sh
+# Output: app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## Architecture notes
+---
 
-- UI: Jetpack Compose, 1:1 classic OBS dark theme for tablets
-- Engine: Pure Android path is primary (`HardwareMediaPipeline`, `GlZeroCopyCompositor`, `AudioCaptureMixer`, etc.)
-- Native: `libobs` JNI bridge + MediaCodec encoder plugin exist but depend on a successful NDK build of libobs
+## How to test a real stream on Tab A9+
+
+1. Install the debug or release APK.
+2. Grant **Microphone**, **Camera**, and **Notifications** when asked.
+3. Open stream settings → enter your Twitch or YouTube RTMP URL + stream key (keys are stored encrypted).
+4. Tap **Start Streaming** / Arm → accept the MediaProjection consent dialog.
+5. Confirm the notification says **OBSmobile · LIVE**.
+6. Check Twitch/YouTube dashboard for the stream.
+7. For recording: start Record, wait ≥ 2 seconds, stop. File should appear under Movies (or your chosen folder).
+
+---
+
+## Architecture (short)
+
+- **UI**: Jetpack Compose, classic OBS dark theme, 5 bottom docks
+- **Capture**: MediaProjection + VirtualDisplay → GLES compositor
+- **Encode**: Shared MediaCodec H.264 (Surface input) + AAC
+- **Outputs**: Local MediaMuxer (with pause/resume PTS rebase) + RTMP/RTMPS senders
+- **Audio**: AudioRecord (mic) + AudioPlaybackCapture (game/system, when the other app allows it)
+- **Native**: Optional libobs JNI bridge (not required for core features)
+
+---
+
+## Phase history
+
+- **Phase 1**: Renamed to OBSmobile, made native job optional, single reliable APK path
+- **Phase 2**: Branding polish, notification improvements, research into recording/audio platform limits, accurate status docs
+
+---
+
+## Disclaimer
+
+This is an independent project inspired by OBS Studio. It is **not** affiliated with or endorsed by the OBS Project.
