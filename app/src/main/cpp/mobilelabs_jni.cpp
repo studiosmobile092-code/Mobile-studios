@@ -8,7 +8,7 @@
 #include "mediacodec_obs_encoder.h"
 #include "vulkan_spike_probe.h"
 
-#define ML_JNI_TAG "MobileLabsJni"
+#define ML_JNI_TAG "OBSmobileJni"
 #define JLOGI(...) __android_log_print(ANDROID_LOG_INFO, ML_JNI_TAG, __VA_ARGS__)
 #define JLOGE(...) __android_log_print(ANDROID_LOG_ERROR, ML_JNI_TAG, __VA_ARGS__)
 
@@ -133,6 +133,9 @@ Java_com_example_mobilelabs_engine_ObsNativeJni_nativeConfigureVideo(
 ) {
     std::lock_guard<std::mutex> lock(g_engine.mu);
     if (!g_engine.started) return JNI_FALSE;
+    if (canvasWidth <= 0 || canvasHeight <= 0 || outputWidth <= 0 || outputHeight <= 0 || fps <= 0) {
+        return JNI_FALSE;
+    }
 
     struct obs_video_info ovi = {};
     ovi.graphics_module = "libobs-opengl";
@@ -149,17 +152,23 @@ Java_com_example_mobilelabs_engine_ObsNativeJni_nativeConfigureVideo(
     ovi.range = VIDEO_RANGE_PARTIAL;
     ovi.scale_type = OBS_SCALE_BILINEAR;
 
-    int res = obs_reset_video(&ovi);
-    if (res != OBS_VIDEO_SUCCESS) {
-        JLOGE("obs_reset_video failed with code %d", res);
-        return JNI_FALSE;
-    }
-
     g_engine.canvas_w = static_cast<uint32_t>(canvasWidth);
     g_engine.canvas_h = static_cast<uint32_t>(canvasHeight);
     g_engine.output_w = static_cast<uint32_t>(outputWidth);
     g_engine.output_h = static_cast<uint32_t>(outputHeight);
     g_engine.fps = static_cast<uint32_t>(fps);
+
+    int res = obs_reset_video(&ovi);
+    if (res == OBS_VIDEO_MODULE_NOT_FOUND) {
+        // Core Android libobs omits desktop X11/Wayland libobs-opengl winsys; GPU compositing runs in GlZeroCopyCompositor.
+        JLOGI("obs_reset_video skipped (no desktop libobs-opengl winsys; GlZeroCopyCompositor GLES3 handles %dx%d -> %dx%d @ %dfps)",
+              canvasWidth, canvasHeight, outputWidth, outputHeight, fps);
+        return JNI_TRUE;
+    }
+    if (res != OBS_VIDEO_SUCCESS) {
+        JLOGE("obs_reset_video failed with code %d", res);
+        return JNI_FALSE;
+    }
     return JNI_TRUE;
 }
 
@@ -257,7 +266,7 @@ Java_com_example_mobilelabs_engine_ObsNativeJni_nativeSetTransition(
         g_engine.active_transition = nullptr;
     }
     if (id) {
-        g_engine.active_transition = obs_source_create_private(id, "MobileLabsTransition", nullptr);
+        g_engine.active_transition = obs_source_create_private(id, "OBSmobileTransition", nullptr);
         env->ReleaseStringUTFChars(jTransitionObsId, id);
     }
     if (g_engine.active_transition) {

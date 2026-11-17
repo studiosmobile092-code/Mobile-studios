@@ -8,6 +8,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -137,7 +138,7 @@ fun ConnectionsAndMultiStreamDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             "1-Click Stream Destinations & Multi-Stream",
                             style = MaterialTheme.typography.titleMedium,
@@ -168,44 +169,88 @@ fun ConnectionsAndMultiStreamDialog(
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        PlatformDestinationCard(
-                            conn = state.youtubeConnection,
-                            accent = YouTubeRed,
-                            twitchCategories = emptyList(),
-                            twitchDeviceAuth = null,
-                            onConnect = { onStartOAuth(StreamingPlatform.YOUTUBE) },
-                            onStartDeviceAuth = {},
-                            onCancelDeviceAuth = {},
-                            onOpenExternalUrl = onOpenExternalUrl,
-                            onDisconnect = { onDisconnect(StreamingPlatform.YOUTUBE) },
-                            onToggleMulti = { onToggleMultiStream(StreamingPlatform.YOUTUBE, it) },
-                            onSearchCategories = {},
-                            onSaveMeta = { title, catId, catName, privacy ->
-                                onUpdateBroadcastMeta(StreamingPlatform.YOUTUBE, title, catId, catName, privacy)
-                            },
-                            modifier = Modifier.weight(1f)
-                        )
-                        PlatformDestinationCard(
-                            conn = state.twitchConnection,
-                            accent = TwitchPurple,
-                            twitchCategories = state.twitchCategories,
-                            twitchDeviceAuth = state.twitchDeviceAuth,
-                            onConnect = { onStartOAuth(StreamingPlatform.TWITCH) },
-                            onStartDeviceAuth = onStartTwitchDeviceAuth,
-                            onCancelDeviceAuth = onCancelTwitchDeviceAuth,
-                            onOpenExternalUrl = onOpenExternalUrl,
-                            onDisconnect = { onDisconnect(StreamingPlatform.TWITCH) },
-                            onToggleMulti = { onToggleMultiStream(StreamingPlatform.TWITCH, it) },
-                            onSearchCategories = onSearchTwitchCategories,
-                            onSaveMeta = { title, catId, catName, privacy ->
-                                onUpdateBroadcastMeta(StreamingPlatform.TWITCH, title, catId, catName, privacy)
-                            },
-                            modifier = Modifier.weight(1f)
-                        )
+                    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                        if (maxWidth >= 680.dp) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                PlatformDestinationCard(
+                                    conn = state.youtubeConnection,
+                                    accent = YouTubeRed,
+                                    twitchCategories = emptyList(),
+                                    twitchDeviceAuth = null,
+                                    onConnect = { onStartOAuth(StreamingPlatform.YOUTUBE) },
+                                    onStartDeviceAuth = {},
+                                    onCancelDeviceAuth = {},
+                                    onOpenExternalUrl = onOpenExternalUrl,
+                                    onDisconnect = { onDisconnect(StreamingPlatform.YOUTUBE) },
+                                    onToggleMulti = { onToggleMultiStream(StreamingPlatform.YOUTUBE, it) },
+                                    onSearchCategories = {},
+                                    onSaveMeta = { title, catId, catName, privacy ->
+                                        onUpdateBroadcastMeta(StreamingPlatform.YOUTUBE, title, catId, catName, privacy)
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                )
+                                PlatformDestinationCard(
+                                    conn = state.twitchConnection,
+                                    accent = TwitchPurple,
+                                    twitchCategories = state.twitchCategories,
+                                    twitchDeviceAuth = state.twitchDeviceAuth,
+                                    onConnect = { onStartOAuth(StreamingPlatform.TWITCH) },
+                                    onStartDeviceAuth = onStartTwitchDeviceAuth,
+                                    onCancelDeviceAuth = onCancelTwitchDeviceAuth,
+                                    onOpenExternalUrl = onOpenExternalUrl,
+                                    onDisconnect = { onDisconnect(StreamingPlatform.TWITCH) },
+                                    onToggleMulti = { onToggleMultiStream(StreamingPlatform.TWITCH, it) },
+                                    onSearchCategories = onSearchTwitchCategories,
+                                    onSaveMeta = { title, catId, catName, privacy ->
+                                        onUpdateBroadcastMeta(StreamingPlatform.TWITCH, title, catId, catName, privacy)
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        } else {
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                PlatformDestinationCard(
+                                    conn = state.youtubeConnection,
+                                    accent = YouTubeRed,
+                                    twitchCategories = emptyList(),
+                                    twitchDeviceAuth = null,
+                                    onConnect = { onStartOAuth(StreamingPlatform.YOUTUBE) },
+                                    onStartDeviceAuth = {},
+                                    onCancelDeviceAuth = {},
+                                    onOpenExternalUrl = onOpenExternalUrl,
+                                    onDisconnect = { onDisconnect(StreamingPlatform.YOUTUBE) },
+                                    onToggleMulti = { onToggleMultiStream(StreamingPlatform.YOUTUBE, it) },
+                                    onSearchCategories = {},
+                                    onSaveMeta = { title, catId, catName, privacy ->
+                                        onUpdateBroadcastMeta(StreamingPlatform.YOUTUBE, title, catId, catName, privacy)
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                PlatformDestinationCard(
+                                    conn = state.twitchConnection,
+                                    accent = TwitchPurple,
+                                    twitchCategories = state.twitchCategories,
+                                    twitchDeviceAuth = state.twitchDeviceAuth,
+                                    onConnect = { onStartOAuth(StreamingPlatform.TWITCH) },
+                                    onStartDeviceAuth = onStartTwitchDeviceAuth,
+                                    onCancelDeviceAuth = onCancelTwitchDeviceAuth,
+                                    onOpenExternalUrl = onOpenExternalUrl,
+                                    onDisconnect = { onDisconnect(StreamingPlatform.TWITCH) },
+                                    onToggleMulti = { onToggleMultiStream(StreamingPlatform.TWITCH, it) },
+                                    onSearchCategories = onSearchTwitchCategories,
+                                    onSaveMeta = { title, catId, catName, privacy ->
+                                        onUpdateBroadcastMeta(StreamingPlatform.TWITCH, title, catId, catName, privacy)
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        }
                     }
 
                     Surface(
@@ -760,7 +805,7 @@ fun ProToolsDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Mobile Labs Pro Creator Tools", style = MaterialTheme.typography.titleMedium, color = StudioText)
+                    Text("OBSmobile Pro Creator Tools", style = MaterialTheme.typography.titleMedium, color = StudioText)
                     TextButton(onClick = onDismiss) { Text("Close", color = StudioText) }
                 }
 

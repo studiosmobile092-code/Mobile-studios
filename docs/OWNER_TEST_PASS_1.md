@@ -2,7 +2,7 @@
 
 ## Part A: External Measurement Commands (Run from PC over ADB)
 
-Use the exact same method for Game-Only baseline (3 runs) and Game + Mobile Labs Live runs:
+Use the exact same method for Game-Only baseline (3 runs) and Game + OBSmobile Live runs:
 
 ```bash
 # 1. Record device build & thermal baseline before run
@@ -10,7 +10,7 @@ adb shell getprop ro.product.model
 adb shell getprop ro.build.display.id
 adb shell dumpsys thermalservice
 
-# 2. Sample Mobile Labs memory PSS while streaming
+# 2. Sample OBSmobile memory PSS while streaming
 adb shell dumpsys meminfo com.mobilelabs.studio
 
 # 3. Sample battery temperature & drain
@@ -33,7 +33,7 @@ adb pull /data/misc/perfetto-traces/ml_trace.pftrace .
 | T1.5 | Mic and system audio | Mic meter moves; game/YouTube meter moves, or honest unavailable notice | MUST | |
 | T1.6 | Add Camera2 source, switch front/rear, remove | Front/rear/switch work; releases cleanly on removal | MUST | |
 | T1.7 | Stream to local RTMP receiver, then toggle Wi-Fi off/on | `LIVE` only after connect; `RECONNECTING` countdown shown; clean stop | MUST | |
-| T1.8 | Record 10 min; then force-stop during a second recording | Finalized MP4 in `Movies/Mobile Labs`; interrupted file listed `INCOMPLETE` | MUST | |
+| T1.8 | Record 10 min; then force-stop during a second recording | Finalized MP4 in `Movies/OBSmobile`; interrupted file listed `INCOMPLETE` | MUST | |
 | T1.9 | Enable optional Floating Control in Settings; test over osu! & Geometry Dash | Start/stop works; game touch unaffected | MUST | |
 | T1.10 | 30-min stream + record with Geometry Dash & osu!; `Export Redacted ZIP` | Meets §11.4 thresholds vs baseline, or deviations reported | MUST | |
 | T1.11 | Check encoder mode in HUD | Shows `OPTIMAL` hardware H.264 (or honest `DEGRADED`/`EMERGENCY`) | MUST | |

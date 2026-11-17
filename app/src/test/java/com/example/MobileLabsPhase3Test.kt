@@ -150,7 +150,7 @@ class MobileLabsPhase3Test {
             benchmarkRecords = listOf(
                 BenchmarkRecord(
                     id = "b1",
-                    appName = "Mobile Labs",
+                    appName = "OBSmobile",
                     presetLabel = "720p60",
                     gameName = "Geometry Dash",
                     gameAvgFps = 60f,
@@ -186,7 +186,7 @@ class MobileLabsPhase3Test {
         val repo = SceneCollectionRepository(ctx)
         val sample = BenchmarkRecord(
             id = "run_1",
-            appName = "Mobile Labs",
+            appName = "OBSmobile",
             presetLabel = "1280x720@60",
             gameName = "osu!",
             gameAvgFps = 59.8f,

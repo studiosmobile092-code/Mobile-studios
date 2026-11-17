@@ -39,6 +39,21 @@ import kotlin.math.min
  */
 object DynamicSourceRenderer {
 
+    private val renderLock = Any()
+    private val defaultBoldTypeface: Typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+    private val defaultNormalTypeface: Typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
+    private val monoBoldTypeface: Typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+
+    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val textPaintShared = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val layoutTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textSize = 22f
+        typeface = defaultNormalTypeface
+    }
+    private val inkPath = Path()
+
     fun computeTimerDisplaySeconds(src: SourceModel, nowMs: Long = System.currentTimeMillis()): Int {
         val activeElapsed = if (src.timerRunning && src.timerStartedAtMs > 0L) {
             src.timerElapsedBeforeMs + (nowMs - src.timerStartedAtMs).coerceAtLeast(0L)
@@ -61,141 +76,111 @@ object DynamicSourceRenderer {
         return if (hrs > 0) "%d:%02d:%02d".format(hrs, mins, secs) else "%02d:%02d".format(mins, secs)
     }
 
-    fun renderTimerBitmap(src: SourceModel, nowMs: Long = System.currentTimeMillis()): Bitmap {
+    fun renderTimerBitmap(src: SourceModel, nowMs: Long = System.currentTimeMillis()): Bitmap = synchronized(renderLock) {
         val text = computeTimerDisplayString(src, nowMs)
         val bmp = createBitmap(420, 128, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
-        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = src.textBgColorArgb.toInt()
-        }
-        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 3f
-            color = if (src.timerRunning) 0xFF2ECC71.toInt() else 0xFFFFB020.toInt()
-        }
+        fillPaint.color = src.textBgColorArgb.toInt()
+        strokePaint.strokeWidth = 3f
+        strokePaint.color = if (src.timerRunning) 0xFF2ECC71.toInt() else 0xFFFFB020.toInt()
         val rect = RectF(6f, 6f, 414f, 122f)
-        canvas.drawRoundRect(rect, 22f, 22f, bgPaint)
-        canvas.drawRoundRect(rect, 22f, 22f, borderPaint)
+        canvas.drawRoundRect(rect, 22f, 22f, fillPaint)
+        canvas.drawRoundRect(rect, 22f, 22f, strokePaint)
 
-        val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xFFAEB4C2.toInt()
-            textSize = 20f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            textAlign = Paint.Align.CENTER
-        }
+        textPaintShared.color = 0xFFAEB4C2.toInt()
+        textPaintShared.textSize = 20f
+        textPaintShared.typeface = defaultBoldTypeface
+        textPaintShared.textAlign = Paint.Align.CENTER
         val modeLabel = if (src.timerCountDown) "COUNTDOWN" else "STOPWATCH"
-        canvas.drawText(modeLabel, 210f, 34f, labelPaint)
+        canvas.drawText(modeLabel, 210f, 34f, textPaintShared)
 
-        val timePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = src.textColorArgb.toInt()
-            textSize = 62f
-            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-            textAlign = Paint.Align.CENTER
-        }
-        canvas.drawText(text, 210f, 102f, timePaint)
+        textPaintShared.color = src.textColorArgb.toInt()
+        textPaintShared.textSize = 62f
+        textPaintShared.typeface = monoBoldTypeface
+        textPaintShared.textAlign = Paint.Align.CENTER
+        canvas.drawText(text, 210f, 102f, textPaintShared)
         return bmp
     }
 
-    fun renderScoreboardBitmap(src: SourceModel): Bitmap {
+    fun renderScoreboardBitmap(src: SourceModel): Bitmap = synchronized(renderLock) {
         val bmp = createBitmap(640, 116, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
 
-        val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xDC11141B.toInt() }
-        val accentHome = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFCC1B1B.toInt() }
-        val accentAway = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF2563EB.toInt() }
-        val border = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 3f
-            color = 0xFF394154.toInt()
-        }
-
         val outer = RectF(4f, 4f, 636f, 112f)
-        canvas.drawRoundRect(outer, 18f, 18f, bg)
-        canvas.drawRoundRect(RectF(8f, 8f, 270f, 108f), 14f, 14f, accentHome)
-        canvas.drawRoundRect(RectF(370f, 8f, 632f, 108f), 14f, 14f, accentAway)
-        canvas.drawRoundRect(outer, 18f, 18f, border)
+        fillPaint.color = 0xDC11141B.toInt()
+        canvas.drawRoundRect(outer, 18f, 18f, fillPaint)
+        fillPaint.color = 0xFFCC1B1B.toInt()
+        canvas.drawRoundRect(RectF(8f, 8f, 270f, 108f), 14f, 14f, fillPaint)
+        fillPaint.color = 0xFF2563EB.toInt()
+        canvas.drawRoundRect(RectF(370f, 8f, 632f, 108f), 14f, 14f, fillPaint)
+        strokePaint.strokeWidth = 3f
+        strokePaint.color = 0xFF394154.toInt()
+        canvas.drawRoundRect(outer, 18f, 18f, strokePaint)
 
-        val namePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            textSize = 26f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            textAlign = Paint.Align.LEFT
-        }
-        val scorePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            textSize = 46f
-            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-            textAlign = Paint.Align.CENTER
-        }
-        val vsPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xFFCBD5E1.toInt()
-            textSize = 24f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            textAlign = Paint.Align.CENTER
-        }
+        textPaintShared.color = Color.WHITE
+        textPaintShared.textSize = 26f
+        textPaintShared.typeface = defaultBoldTypeface
+        textPaintShared.textAlign = Paint.Align.LEFT
+        canvas.drawText(src.scoreHomeName.take(10), 22f, 66f, textPaintShared)
 
-        canvas.drawText(src.scoreHomeName.take(10), 22f, 66f, namePaint)
-        canvas.drawText(src.scoreHome.toString(), 224f, 74f, scorePaint)
-        canvas.drawText("VS", 320f, 66f, vsPaint)
-        canvas.drawText(src.scoreAway.toString(), 416f, 74f, scorePaint)
-        namePaint.textAlign = Paint.Align.RIGHT
-        canvas.drawText(src.scoreAwayName.take(10), 616f, 66f, namePaint)
+        textPaintShared.textAlign = Paint.Align.RIGHT
+        canvas.drawText(src.scoreAwayName.take(10), 616f, 66f, textPaintShared)
+
+        textPaintShared.textSize = 46f
+        textPaintShared.typeface = monoBoldTypeface
+        textPaintShared.textAlign = Paint.Align.CENTER
+        canvas.drawText(src.scoreHome.toString(), 224f, 74f, textPaintShared)
+        canvas.drawText(src.scoreAway.toString(), 416f, 74f, textPaintShared)
+
+        textPaintShared.color = 0xFFCBD5E1.toInt()
+        textPaintShared.textSize = 24f
+        textPaintShared.typeface = defaultBoldTypeface
+        textPaintShared.textAlign = Paint.Align.CENTER
+        canvas.drawText("VS", 320f, 66f, textPaintShared)
         return bmp
     }
 
     fun renderChatOverlayBitmap(
         messages: List<PlatformChatMessage>,
         src: SourceModel
-    ): Bitmap {
+    ): Bitmap = synchronized(renderLock) {
         val width = 560
         val height = 440
         val bmp = createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
 
         val alphaInt = (src.chatOverlayOpacity.coerceIn(0.1f, 1f) * 255).toInt()
-        val bgColor = Color.argb(alphaInt, 14, 17, 23)
-        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = bgColor }
-        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 2f
-            color = Color.argb(alphaInt, 60, 72, 92)
-        }
-        canvas.drawRoundRect(RectF(2f, 2f, width - 2f, height - 2f), 16f, 16f, bgPaint)
-        canvas.drawRoundRect(RectF(2f, 2f, width - 2f, height - 2f), 16f, 16f, borderPaint)
+        fillPaint.color = Color.argb(alphaInt, 14, 17, 23)
+        strokePaint.strokeWidth = 2f
+        strokePaint.color = Color.argb(alphaInt, 60, 72, 92)
+        canvas.drawRoundRect(RectF(2f, 2f, width - 2f, height - 2f), 16f, 16f, fillPaint)
+        canvas.drawRoundRect(RectF(2f, 2f, width - 2f, height - 2f), 16f, 16f, strokePaint)
 
-        val headerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xFFE2E8F0.toInt()
-            textSize = 19f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        }
-        canvas.drawText("LIVE CHAT", 16f, 28f, headerPaint)
+        textPaintShared.color = 0xFFE2E8F0.toInt()
+        textPaintShared.textSize = 19f
+        textPaintShared.typeface = defaultBoldTypeface
+        textPaintShared.textAlign = Paint.Align.LEFT
+        canvas.drawText("LIVE CHAT", 16f, 28f, textPaintShared)
 
         val recent = messages.takeLast(src.chatOverlayMaxMessages.coerceIn(2, 12))
         if (recent.isEmpty()) {
-            val emptyPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = 0xFF94A3B8.toInt()
-                textSize = 20f
-            }
-            canvas.drawText("Waiting for YouTube / Twitch chat…", 18f, 72f, emptyPaint)
+            textPaintShared.color = 0xFF94A3B8.toInt()
+            textPaintShared.textSize = 20f
+            textPaintShared.typeface = defaultNormalTypeface
+            canvas.drawText("Waiting for YouTube / Twitch chat…", 18f, 72f, textPaintShared)
             return bmp
         }
 
-        val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            textSize = 22f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
-        }
-        val authorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            textSize = 21f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        }
+        textPaintShared.textSize = 21f
+        textPaintShared.typeface = defaultBoldTypeface
+        textPaintShared.textAlign = Paint.Align.LEFT
 
         var yCursor = 52f
         val maxY = height - 14f
         for (msg in recent) {
             if (yCursor >= maxY) break
             val platTag = if (msg.platform == StreamingPlatform.YOUTUBE) "[YT]" else "[TW]"
-            authorPaint.color = msg.colorArgb.toInt()
+            textPaintShared.color = msg.colorArgb.toInt()
             val prefix = buildString {
                 append(platTag)
                 if (msg.badgeLabel.isNotBlank()) append(" ${msg.badgeLabel}")
@@ -203,7 +188,7 @@ object DynamicSourceRenderer {
             }
             val fullLine = prefix + msg.text
             val layout = StaticLayout.Builder
-                .obtain(fullLine, 0, fullLine.length, textPaint, width - 32)
+                .obtain(fullLine, 0, fullLine.length, layoutTextPaint, width - 32)
                 .setAlignment(Layout.Alignment.ALIGN_NORMAL)
                 .setMaxLines(2)
                 .build()
@@ -212,61 +197,51 @@ object DynamicSourceRenderer {
             canvas.translate(16f, yCursor)
             layout.draw(canvas)
             canvas.restore()
-            // Paint author tag over first line left edge cleanly
-            canvas.drawText(prefix, 16f, yCursor + 22f, authorPaint)
+            canvas.drawText(prefix, 16f, yCursor + 22f, textPaintShared)
             yCursor += layout.height + 10f
         }
         return bmp
     }
 
-    fun renderAlertBoxBitmap(event: StreamAlertEvent?): Bitmap {
+    fun renderAlertBoxBitmap(event: StreamAlertEvent?): Bitmap = synchronized(renderLock) {
         val width = 640
         val height = 160
         val bmp = createBitmap(width, height, Bitmap.Config.ARGB_8888)
         if (event == null) {
-            return bmp // Transparent when idle
+            return bmp
         }
         val canvas = Canvas(bmp)
         val accent = event.type.accentArgb.toInt()
-        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xEB10141F.toInt() }
-        val accentPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = accent }
-        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 4f
-            color = accent
-        }
-
         val outer = RectF(6f, 6f, width - 6f, height - 6f)
-        canvas.drawRoundRect(outer, 24f, 24f, bgPaint)
-        canvas.drawRoundRect(RectF(6f, 6f, 22f, height - 6f), 12f, 12f, accentPaint)
-        canvas.drawRoundRect(outer, 24f, 24f, borderPaint)
+        fillPaint.color = 0xEB10141F.toInt()
+        canvas.drawRoundRect(outer, 24f, 24f, fillPaint)
+        fillPaint.color = accent
+        canvas.drawRoundRect(RectF(6f, 6f, 22f, height - 6f), 12f, 12f, fillPaint)
+        strokePaint.strokeWidth = 4f
+        strokePaint.color = accent
+        canvas.drawRoundRect(outer, 24f, 24f, strokePaint)
 
-        val badgePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = accent
-            textSize = 20f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        }
+        textPaintShared.textAlign = Paint.Align.LEFT
+        textPaintShared.color = accent
+        textPaintShared.textSize = 20f
+        textPaintShared.typeface = defaultBoldTypeface
         val platTag = if (event.platform == StreamingPlatform.YOUTUBE) "YOUTUBE" else "TWITCH"
-        canvas.drawText("$platTag · ${event.type.label}", 42f, 44f, badgePaint)
+        canvas.drawText("$platTag · ${event.type.label}", 42f, 44f, textPaintShared)
 
-        val senderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            textSize = 40f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        }
-        canvas.drawText(event.senderName.take(24), 42f, 94f, senderPaint)
+        textPaintShared.color = Color.WHITE
+        textPaintShared.textSize = 40f
+        canvas.drawText(event.senderName.take(24), 42f, 94f, textPaintShared)
 
         if (event.detailText.isNotBlank()) {
-            val detailPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = 0xFFD5DCE8.toInt()
-                textSize = 24f
-            }
-            canvas.drawText(event.detailText.take(44), 42f, 132f, detailPaint)
+            textPaintShared.color = 0xFFD5DCE8.toInt()
+            textPaintShared.textSize = 24f
+            textPaintShared.typeface = defaultNormalTypeface
+            canvas.drawText(event.detailText.take(44), 42f, 132f, textPaintShared)
         }
         return bmp
     }
 
-    fun renderGoalBarBitmap(src: SourceModel): Bitmap {
+    fun renderGoalBarBitmap(src: SourceModel): Bitmap = synchronized(renderLock) {
         val width = 620
         val height = 108
         val bmp = createBitmap(width, height, Bitmap.Config.ARGB_8888)
@@ -277,36 +252,29 @@ object DynamicSourceRenderer {
         val fraction = (current.toFloat() / target.toFloat()).coerceIn(0f, 1f)
         val pct = ((current.toFloat() / target.toFloat()) * 100f).toInt().coerceAtMost(999)
 
-        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xE011141C.toInt() }
-        val trackPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF272E3F.toInt() }
-        val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = src.goalAccentColorArgb.toInt() }
-        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 2.5f
-            color = 0xFF3E4961.toInt()
-        }
-
         val outer = RectF(4f, 4f, width - 4f, height - 4f)
-        canvas.drawRoundRect(outer, 20f, 20f, bgPaint)
-        canvas.drawRoundRect(outer, 20f, 20f, borderPaint)
+        fillPaint.color = 0xE011141C.toInt()
+        canvas.drawRoundRect(outer, 20f, 20f, fillPaint)
+        strokePaint.strokeWidth = 2.5f
+        strokePaint.color = 0xFF3E4961.toInt()
+        canvas.drawRoundRect(outer, 20f, 20f, strokePaint)
 
-        val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            textSize = 23f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        }
-        val countPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xFFE2E8F0.toInt()
-            textSize = 23f
-            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-            textAlign = Paint.Align.RIGHT
-        }
-        canvas.drawText(src.goalTitle.ifBlank { "STREAM GOAL" }.take(28), 22f, 38f, titlePaint)
-        canvas.drawText("$current / $target ($pct%)", width - 22f, 38f, countPaint)
+        textPaintShared.color = Color.WHITE
+        textPaintShared.textSize = 23f
+        textPaintShared.typeface = defaultBoldTypeface
+        textPaintShared.textAlign = Paint.Align.LEFT
+        canvas.drawText(src.goalTitle.ifBlank { "STREAM GOAL" }.take(28), 22f, 38f, textPaintShared)
+
+        textPaintShared.color = 0xFFE2E8F0.toInt()
+        textPaintShared.typeface = monoBoldTypeface
+        textPaintShared.textAlign = Paint.Align.RIGHT
+        canvas.drawText("$current / $target ($pct%)", width - 22f, 38f, textPaintShared)
 
         val barRect = RectF(20f, 54f, width - 20f, 88f)
-        canvas.drawRoundRect(barRect, 14f, 14f, trackPaint)
+        fillPaint.color = 0xFF272E3F.toInt()
+        canvas.drawRoundRect(barRect, 14f, 14f, fillPaint)
         if (fraction > 0.01f) {
+            fillPaint.color = src.goalAccentColorArgb.toInt()
             val fillRight = (barRect.left + barRect.width() * fraction).coerceAtLeast(barRect.left + 20f)
             canvas.drawRoundRect(RectF(barRect.left, barRect.top, fillRight, barRect.bottom), 14f, 14f, fillPaint)
         }
@@ -317,35 +285,32 @@ object DynamicSourceRenderer {
         strokes: List<DrawingStroke>,
         width: Int,
         height: Int
-    ): Bitmap {
+    ): Bitmap = synchronized(renderLock) {
         val w = width.coerceIn(320, 1920)
         val h = height.coerceIn(180, 1080)
         val bmp = createBitmap(w, h, Bitmap.Config.ARGB_8888)
         if (strokes.isEmpty()) return bmp
 
         val canvas = Canvas(bmp)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeCap = Paint.Cap.ROUND
-            strokeJoin = Paint.Join.ROUND
-        }
+        strokePaint.strokeCap = Paint.Cap.ROUND
+        strokePaint.strokeJoin = Paint.Join.ROUND
         for (stroke in strokes) {
             if (stroke.points.isEmpty()) continue
-            paint.color = stroke.colorArgb.toInt()
-            paint.strokeWidth = (stroke.strokeWidthFraction * min(w, h)).coerceIn(2f, 48f)
+            val sw = (stroke.strokeWidthFraction * min(w, h)).coerceIn(2f, 48f)
             if (stroke.points.size == 1) {
                 val pt = stroke.points[0]
-                paint.style = Paint.Style.FILL
-                canvas.drawCircle(pt.first * w, pt.second * h, paint.strokeWidth * 0.5f, paint)
-                paint.style = Paint.Style.STROKE
+                fillPaint.color = stroke.colorArgb.toInt()
+                canvas.drawCircle(pt.first * w, pt.second * h, sw * 0.5f, fillPaint)
             } else {
-                val path = Path()
-                path.moveTo(stroke.points[0].first * w, stroke.points[0].second * h)
+                strokePaint.color = stroke.colorArgb.toInt()
+                strokePaint.strokeWidth = sw
+                inkPath.reset()
+                inkPath.moveTo(stroke.points[0].first * w, stroke.points[0].second * h)
                 for (i in 1 until stroke.points.size) {
                     val p = stroke.points[i]
-                    path.lineTo(p.first * w, p.second * h)
+                    inkPath.lineTo(p.first * w, p.second * h)
                 }
-                canvas.drawPath(path, paint)
+                canvas.drawPath(inkPath, strokePaint)
             }
         }
         return bmp

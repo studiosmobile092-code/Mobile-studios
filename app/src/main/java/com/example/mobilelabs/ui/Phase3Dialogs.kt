@@ -3,6 +3,7 @@ package com.example.mobilelabs.ui
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -233,7 +234,7 @@ fun OnboardingAndAutoTuneDialog(
         ) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("Mobile Labs Quick-Start & Auto-Tune Wizard", style = MaterialTheme.typography.titleMedium, color = StudioText)
+                    Text("OBSmobile Quick-Start & Auto-Tune Wizard", style = MaterialTheme.typography.titleMedium, color = StudioText, modifier = Modifier.weight(1f))
                     TextButton(onClick = { onCompleteOnboarding(); onDismiss() }) { Text("Skip to OBS Studio", color = StudioTextDim) }
                 }
 
@@ -311,7 +312,7 @@ fun BenchmarkKitDialog(
     onDeleteBenchmark: (String) -> Unit,
     onExportDiagnosticsZip: () -> Unit
 ) {
-    var appName by remember { mutableStateOf("Mobile Labs") }
+    var appName by remember { mutableStateOf("OBSmobile") }
     var gameName by remember { mutableStateOf("Geometry Dash") }
     var avgFpsText by remember { mutableStateOf("60.0") }
     var onePctLowText by remember { mutableStateOf("57.0") }
@@ -326,7 +327,7 @@ fun BenchmarkKitDialog(
         ) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("Mobile Labs Benchmark Kit (§14.4)", style = MaterialTheme.typography.titleMedium, color = StudioText)
+                    Text("OBSmobile Benchmark Kit (§14.4)", style = MaterialTheme.typography.titleMedium, color = StudioText, modifier = Modifier.weight(1f))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = onExportDiagnosticsZip) { Text("Export ZIP + Benchmarks", color = StudioText) }
                         TextButton(onClick = onDismiss) { Text("Close", color = StudioText) }
@@ -339,11 +340,26 @@ fun BenchmarkKitDialog(
                     color = StatusOk
                 )
 
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-                    OutlinedTextField(value = appName, onValueChange = { appName = it }, label = { Text("App (Mobile Labs / Prism / Streamlabs)") }, singleLine = true, modifier = Modifier.weight(1f))
-                    OutlinedTextField(value = gameName, onValueChange = { gameName = it }, label = { Text("Game") }, singleLine = true, modifier = Modifier.weight(0.7f))
-                    OutlinedTextField(value = avgFpsText, onValueChange = { avgFpsText = it }, label = { Text("Avg FPS") }, singleLine = true, modifier = Modifier.weight(0.45f))
-                    OutlinedTextField(value = onePctLowText, onValueChange = { onePctLowText = it }, label = { Text("1% Low") }, singleLine = true, modifier = Modifier.weight(0.45f))
+                BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                    if (maxWidth >= 680.dp) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                            OutlinedTextField(value = appName, onValueChange = { appName = it }, label = { Text("App (OBSmobile / Prism / Streamlabs)") }, singleLine = true, modifier = Modifier.weight(1f))
+                            OutlinedTextField(value = gameName, onValueChange = { gameName = it }, label = { Text("Game") }, singleLine = true, modifier = Modifier.weight(0.7f))
+                            OutlinedTextField(value = avgFpsText, onValueChange = { avgFpsText = it }, label = { Text("Avg FPS") }, singleLine = true, modifier = Modifier.weight(0.45f))
+                            OutlinedTextField(value = onePctLowText, onValueChange = { onePctLowText = it }, label = { Text("1% Low") }, singleLine = true, modifier = Modifier.weight(0.45f))
+                        }
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                                OutlinedTextField(value = appName, onValueChange = { appName = it }, label = { Text("App (OBSmobile / Prism / Streamlabs)") }, singleLine = true, modifier = Modifier.weight(1f))
+                                OutlinedTextField(value = gameName, onValueChange = { gameName = it }, label = { Text("Game") }, singleLine = true, modifier = Modifier.weight(1f))
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                                OutlinedTextField(value = avgFpsText, onValueChange = { avgFpsText = it }, label = { Text("Avg FPS") }, singleLine = true, modifier = Modifier.weight(1f))
+                                OutlinedTextField(value = onePctLowText, onValueChange = { onePctLowText = it }, label = { Text("1% Low") }, singleLine = true, modifier = Modifier.weight(1f))
+                            }
+                        }
+                    }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(value = notes, onValueChange = { notes = it }, label = { Text("Run Notes") }, singleLine = true, modifier = Modifier.weight(1f))
@@ -399,7 +415,7 @@ fun LicensesAndAboutDialog(
         ) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("About Mobile Labs · SBOM & GPL-2.0-or-later Source Offer", style = MaterialTheme.typography.titleMedium, color = StudioText)
+                    Text("About OBSmobile · SBOM & GPL-2.0-or-later Source Offer", style = MaterialTheme.typography.titleMedium, color = StudioText, modifier = Modifier.weight(1f))
                     TextButton(onClick = onDismiss) { Text("Close", color = StudioText) }
                 }
                 Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -407,7 +423,7 @@ fun LicensesAndAboutDialog(
                     HorizontalDivider(color = ObsBorder)
                     Text("GPL-2.0-or-later Compliance & Written Source Offer", style = MaterialTheme.typography.titleSmall, color = StudioText)
                     Text(
-                        "Mobile Labs incorporates libobs from OBS Studio (pinned upstream commit 57bfcf10a, version 32.2.1) licensed under GNU General Public License v2.0 or later (GPL-2.0-or-later). All C/C++ JNI glue, MediaCodec encoder bindings, and build scripts (scripts/fetch_and_build_obs.sh) are included in the public source repository alongside full notice and attribution.",
+                        "OBSmobile incorporates libobs from OBS Studio (pinned upstream commit 57bfcf10a, version 32.2.1) licensed under GNU General Public License v2.0 or later (GPL-2.0-or-later). All C/C++ JNI glue, MediaCodec encoder bindings, and build scripts (scripts/fetch_and_build_obs.sh) are included in the public source repository alongside full notice and attribution.",
                         style = MaterialTheme.typography.bodySmall,
                         color = StudioTextDim
                     )

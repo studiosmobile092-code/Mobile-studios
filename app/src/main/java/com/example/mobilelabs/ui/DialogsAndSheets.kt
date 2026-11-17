@@ -3,6 +3,7 @@ package com.example.mobilelabs.ui
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -283,7 +284,7 @@ fun SettingsDialog(
                             }
                             HorizontalDivider(color = ObsBorder)
                             Text("Recording Container & Output Folder (SAF)", style = MaterialTheme.typography.titleSmall, color = StudioText)
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 RecordingFormat.entries.forEach { fmt ->
                                     val active = state.videoConfig.recordingFormat == fmt
                                     OutlinedButton(
@@ -293,7 +294,7 @@ fun SettingsDialog(
                                 }
                             }
                             Text(
-                                "Folder: ${state.customRecordingFolderUri ?: "Movies/Mobile Labs (Default MediaStore)"}",
+                                "Folder: ${state.customRecordingFolderUri ?: "Movies/OBSmobile (Default MediaStore)"}",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = StudioTextDim
                             )
@@ -445,7 +446,7 @@ fun SettingsDialog(
                                     colors = ButtonDefaults.buttonColors(containerColor = ObsSelectionBlue)
                                 ) { Text("Save Profile", color = StudioText) }
                             }
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 state.profiles.forEach { prof ->
                                     val active = prof.id == state.activeProfileId
                                     OutlinedButton(
@@ -476,7 +477,7 @@ fun SettingsDialog(
                                     newCollectionName = ""
                                 }) { Text("New", color = StudioText) }
                             }
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 state.savedCollectionNames.forEach { colName ->
                                     val active = colName == state.sceneCollection.name
                                     OutlinedButton(
@@ -564,7 +565,7 @@ fun SettingsDialog(
                             }
 
                             OutlinedButton(onClick = callbacks.onOpenAboutLicenses) {
-                                Text("About Mobile Labs · SBOM & GPL-2.0 Source Offer", color = StudioText)
+                                Text("About OBSmobile · SBOM & GPL-2.0 Source Offer", color = StudioText)
                             }
                         }
                     }

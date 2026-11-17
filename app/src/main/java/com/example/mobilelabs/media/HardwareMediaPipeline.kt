@@ -33,18 +33,31 @@ import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Pure monotonic PTS rebase calculator for Pause / Resume MP4 recording continuity.
+ * Handles independent clock epochs per track (e.g., elapsedRealtime video vs 0-based sample-count AAC audio)
+ * and keeps all tracks phase-aligned across start and pause/resume boundaries.
  */
 class RecordingPtsRebaser {
-    private var basePtsUs: Long = -1L
+    private val segmentBaseRawUs = LongArray(4) { -1L }
+    private val segmentStartOutUs = LongArray(4) { 0L }
+    private val lastOutPtsUs = LongArray(4) { -1L }
+    private val trackAnchorEpoch = IntArray(4) { 0 }
+    private var activeEpoch = 1
+    private var resumeTimelineBaseUs = 0L
     private var totalPausedUs: Long = 0L
     private var pausedAtUs: Long = -1L
+
     var isPaused: Boolean = false
         private set
     var waitingForResumeKeyframe: Boolean = false
         private set
 
     fun reset() {
-        basePtsUs = -1L
+        segmentBaseRawUs.fill(-1L)
+        segmentStartOutUs.fill(0L)
+        lastOutPtsUs.fill(-1L)
+        trackAnchorEpoch.fill(0)
+        activeEpoch = 1
+        resumeTimelineBaseUs = 0L
         totalPausedUs = 0L
         pausedAtUs = -1L
         isPaused = false
@@ -67,23 +80,61 @@ class RecordingPtsRebaser {
         waitingForResumeKeyframe = true
     }
 
+    fun totalPausedDurationMs(nowWallUs: Long = -1L): Long {
+        val activeUs = if (isPaused && pausedAtUs >= 0L && nowWallUs > pausedAtUs) {
+            nowWallUs - pausedAtUs
+        } else 0L
+        return ((totalPausedUs + activeUs).coerceAtLeast(0L)) / 1000L
+    }
+
     /**
-     * Returns rebased microsecond PTS >= 0, or -1L if packet should be skipped (paused / pre-IDR after resume).
+     * Legacy convenience overload mapping video->slot 0 and master audio->slot 1.
      */
-    fun filterAndRebase(isVideo: Boolean, isKey: Boolean, rawPtsUs: Long): Long {
+    fun filterAndRebase(isVideo: Boolean, isKey: Boolean, rawPtsUs: Long): Long =
+        filterAndRebase(if (isVideo) 0 else 1, isVideo, isKey, rawPtsUs)
+
+    /**
+     * Returns rebased microsecond PTS >= 0 for [trackSlot] (0=video, 1=master AAC, 2=mic, 3=game),
+     * or -1L if the packet must be dropped (before first video IDR, while paused, or before resume IDR).
+     */
+    fun filterAndRebase(trackSlot: Int, isVideo: Boolean, isKey: Boolean, rawPtsUs: Long): Long {
         if (isPaused) return -1L
+        val slot = trackSlot.coerceIn(0, 3)
+
         if (waitingForResumeKeyframe) {
             if (isVideo && isKey) {
                 waitingForResumeKeyframe = false
+                activeEpoch++
+                val vStep = 16_667L
+                val aStep = 21_333L
+                val minAudioEnd = maxOf(lastOutPtsUs[1], maxOf(lastOutPtsUs[2], lastOutPtsUs[3]))
+                val prevEnd = maxOf(
+                    if (lastOutPtsUs[0] >= 0L) lastOutPtsUs[0] + vStep else 0L,
+                    if (minAudioEnd >= 0L) minAudioEnd + aStep else 0L
+                )
+                resumeTimelineBaseUs = prevEnd
             } else {
                 return -1L
             }
         }
-        if (basePtsUs < 0L) {
+
+        // Never allow audio frames before the initial video IDR has established timeline t=0.
+        if (trackAnchorEpoch[0] == 0) {
             if (!isVideo || !isKey) return -1L
-            basePtsUs = rawPtsUs
         }
-        return (rawPtsUs - basePtsUs - totalPausedUs).coerceAtLeast(0L)
+
+        if (trackAnchorEpoch[slot] != activeEpoch || segmentBaseRawUs[slot] < 0L) {
+            trackAnchorEpoch[slot] = activeEpoch
+            segmentBaseRawUs[slot] = rawPtsUs
+            segmentStartOutUs[slot] = resumeTimelineBaseUs
+        }
+
+        var outUs = segmentStartOutUs[slot] + (rawPtsUs - segmentBaseRawUs[slot]).coerceAtLeast(0L)
+        if (lastOutPtsUs[slot] >= 0L && outUs <= lastOutPtsUs[slot]) {
+            outUs = lastOutPtsUs[slot] + 1L
+        }
+        lastOutPtsUs[slot] = outUs
+        return outUs
     }
 }
 
@@ -152,7 +203,7 @@ class HardwareMediaPipeline(
     private var lastMuxerMicPtsUs = -1L
     private var lastMuxerGamePtsUs = -1L
     private val segPublishExecutor = Executors.newSingleThreadExecutor { r ->
-        Thread(r, "MobileLabs-SegPublish").apply { isDaemon = true }
+        Thread(r, "OBSmobile-SegPublish").apply { isDaemon = true }
     }
 
     // Instant Replay Buffer
@@ -269,8 +320,9 @@ class HardwareMediaPipeline(
         // Briefly give an already-triggered start/stop an initial IDR + first frames if none written yet
         synchronized(muxerLock) {
             if (muxer != null && (!muxerStarted || muxerVideoCount == 0)) {
+                requestKeyFrame()
                 @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
-                runCatching { (muxerLock as Object).wait(250L) }
+                runCatching { (muxerLock as Object).wait(600L) }
             }
         }
         if (!recordingActive.getAndSet(false)) return
@@ -280,9 +332,11 @@ class HardwareMediaPipeline(
         var muxerStopOk = false
         var videoFrames = 0
         var muxerStopErr: String? = null
+        val nowUs = SystemClock.elapsedRealtimeNanos() / 1000L
         synchronized(muxerLock) {
             file = currentRecordFile
-            durationSec = maxOf(1L, (System.currentTimeMillis() - segmentStartMs) / 1000L)
+            val pausedMs = ptsRebaser.totalPausedDurationMs(nowUs)
+            durationSec = maxOf(1L, ((System.currentTimeMillis() - segmentStartMs) - pausedMs) / 1000L)
             videoFrames = muxerVideoCount
             if (muxerStarted && muxer != null && videoFrames > 0) {
                 runCatching { muxer?.stop() }
@@ -335,12 +389,12 @@ class HardwareMediaPipeline(
     fun publishBitmapScreenshot(bitmap: Bitmap): String? {
         return runCatching {
             val stamp = MediaFileAllocator.currentTimestamp()
-            val fileName = "MobileLabs_Shot_$stamp.png"
+            val fileName = "OBSmobile_Shot_$stamp.png"
             val resolver = context.contentResolver
             val values = ContentValues().apply {
                 put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
                 put(MediaStore.Images.Media.MIME_TYPE, "image/png")
-                put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/Mobile Labs")
+                put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/OBSmobile")
                 put(MediaStore.Images.Media.IS_PENDING, 1)
             }
             val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
@@ -538,7 +592,7 @@ class HardwareMediaPipeline(
     fun getRecordingBytesWritten(): Long = recordBytesWritten.get()
 
     private fun allocateRecordingFile(): File =
-        MediaFileAllocator.allocateTimestampedFile(repository.recordingsDir, "MobileLabs", "mp4")
+        MediaFileAllocator.allocateTimestampedFile(repository.recordingsDir, "OBSmobile", "mp4")
 
     private fun finalizeAndPublishFile(file: File, durationSec: Long) {
         val sizeBytes = file.length()
@@ -596,7 +650,7 @@ class HardwareMediaPipeline(
             videoRunning.set(true)
             onEncoderSurfaceReady(surf)
 
-            videoDrainThread = Thread({ drainVideoLoop(codec) }, "MobileLabs-VideoEnc").apply {
+            videoDrainThread = Thread({ drainVideoLoop(codec) }, "OBSmobile-VideoEnc").apply {
                 start()
             }
         } catch (t: Throwable) {
@@ -689,9 +743,11 @@ class HardwareMediaPipeline(
         val oldFile: File?
         val oldDur: Long
         var oldStopOk = false
+        val nowUs = SystemClock.elapsedRealtimeNanos() / 1000L
         synchronized(muxerLock) {
             oldFile = currentRecordFile
-            oldDur = maxOf(1L, (System.currentTimeMillis() - segmentStartMs) / 1000L)
+            val pausedMs = ptsRebaser.totalPausedDurationMs(nowUs)
+            oldDur = maxOf(1L, ((System.currentTimeMillis() - segmentStartMs) - pausedMs) / 1000L)
             if (muxerStarted && muxerVideoCount > 0) {
                 runCatching { muxer?.stop() }.onSuccess { oldStopOk = true }
             }
@@ -723,53 +779,53 @@ class HardwareMediaPipeline(
         }
     }
 
+    private fun startAacEncoder(
+        audioBitrateKbps: Int,
+        threadName: String,
+        drainBlock: (MediaCodec) -> Unit
+    ): Pair<MediaCodec, Thread> {
+        val fmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, 48000, 2).apply {
+            setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+            setInteger(MediaFormat.KEY_BIT_RATE, audioBitrateKbps * 1000)
+            setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
+        }
+        val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
+        codec.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        codec.start()
+        val thread = Thread({ drainBlock(codec) }, threadName)
+        return codec to thread
+    }
+
     private fun startAudioEncoder(audioBitrateKbps: Int) {
         runCatching {
-            val fmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, 48000, 2).apply {
-                setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-                setInteger(MediaFormat.KEY_BIT_RATE, audioBitrateKbps * 1000)
-                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
+            val (codec, thread) = startAacEncoder(audioBitrateKbps, "OBSmobile-AudioEnc") { c ->
+                drainAudioLoop(c)
             }
-            val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
-            codec.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            codec.start()
             audioEncoder = codec
             audioRunning.set(true)
-            audioDrainThread = Thread({ drainAudioLoop(codec) }, "MobileLabs-AudioEnc").apply {
-                start()
-            }
+            audioDrainThread = thread.apply { start() }
 
             if (multiTrackActive) {
                 runCatching {
-                    val micFmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, 48000, 2).apply {
-                        setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-                        setInteger(MediaFormat.KEY_BIT_RATE, audioBitrateKbps * 1000)
-                        setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
+                    val (micCodec, micThread) = startAacEncoder(audioBitrateKbps, "OBSmobile-MicEnc") { c ->
+                        drainIsolatedAudioLoop(c, trackSlot = 2)
                     }
-                    val micCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
-                    micCodec.configure(micFmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                    micCodec.start()
                     micAudioEncoder = micCodec
-                    micAudioDrainThread = Thread({ drainIsolatedAudioLoop(micCodec, trackSlot = 2) }, "MobileLabs-MicEnc").apply {
-                        start()
-                    }
+                    micAudioDrainThread = micThread.apply { start() }
                 }.onFailure { micAudioEncoder = null }
 
                 runCatching {
-                    val gameFmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, 48000, 2).apply {
-                        setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-                        setInteger(MediaFormat.KEY_BIT_RATE, audioBitrateKbps * 1000)
-                        setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
+                    val (gameCodec, gameThread) = startAacEncoder(audioBitrateKbps, "OBSmobile-GameEnc") { c ->
+                        drainIsolatedAudioLoop(c, trackSlot = 3)
                     }
-                    val gameCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
-                    gameCodec.configure(gameFmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                    gameCodec.start()
                     gameAudioEncoder = gameCodec
-                    gameAudioDrainThread = Thread({ drainIsolatedAudioLoop(gameCodec, trackSlot = 3) }, "MobileLabs-GameEnc").apply {
-                        start()
-                    }
+                    gameAudioDrainThread = gameThread.apply { start() }
                 }.onFailure { gameAudioEncoder = null }
             }
+        }.onFailure { err ->
+            audioRunning.set(false)
+            audioEncoder = null
+            onStreamError("AAC audio encoder init failed: ${err.message ?: err.javaClass.simpleName}")
         }
     }
 
@@ -906,7 +962,8 @@ class HardwareMediaPipeline(
             }
             if (track < 0) return
 
-            var rebasedPts = ptsRebaser.filterAndRebase(isVideo, isKey, info.presentationTimeUs)
+            val trackSlot = if (isVideo) 0 else audioTrackSlot
+            var rebasedPts = ptsRebaser.filterAndRebase(trackSlot, isVideo, isKey, info.presentationTimeUs)
             if (rebasedPts < 0L) return
 
             when {
@@ -1023,7 +1080,7 @@ class HardwareMediaPipeline(
             val values = ContentValues().apply {
                 put(MediaStore.Video.Media.DISPLAY_NAME, sourceFile.name)
                 put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/Mobile Labs")
+                put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/OBSmobile")
                 put(MediaStore.Video.Media.IS_PENDING, 1)
             }
             val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values) ?: return null
@@ -1106,20 +1163,57 @@ object FlvH264Helper {
     }
 
     fun annexBFrameToAvcc(payload: ByteArray): ByteArray {
-        val nalus = splitAnnexBNalus(payload)
-        if (nalus.isEmpty()) return payload
-        val out = ByteArrayOutputStream(payload.size + 16)
-        for (nalu in nalus) {
-            val nalType = nalu[0].toInt() and 0x1F
-            if (nalType == 9 || nalType == 7 || nalType == 8) continue
-            val len = nalu.size
-            out.write((len ushr 24) and 0xFF)
-            out.write((len ushr 16) and 0xFF)
-            out.write((len ushr 8) and 0xFF)
-            out.write(len and 0xFF)
-            out.write(nalu)
+        val n = payload.size
+        var totalOutBytes = 0
+        var i = 0
+        var hasStartCode = false
+        while (i < n) {
+            val scLen = startCodeLengthAt(payload, i)
+            if (scLen > 0) {
+                hasStartCode = true
+                val start = i + scLen
+                var end = start
+                while (end < n && startCodeLengthAt(payload, end) == 0) end++
+                if (end > start) {
+                    val nalType = payload[start].toInt() and 0x1F
+                    if (nalType != 9 && nalType != 7 && nalType != 8) {
+                        totalOutBytes += 4 + (end - start)
+                    }
+                }
+                i = end
+            } else {
+                i++
+            }
         }
-        return if (out.size() > 0) out.toByteArray() else payload
+        if (!hasStartCode || totalOutBytes == 0) return payload
+
+        val out = ByteArray(totalOutBytes)
+        var dst = 0
+        i = 0
+        while (i < n) {
+            val scLen = startCodeLengthAt(payload, i)
+            if (scLen > 0) {
+                val start = i + scLen
+                var end = start
+                while (end < n && startCodeLengthAt(payload, end) == 0) end++
+                val len = end - start
+                if (len > 0) {
+                    val nalType = payload[start].toInt() and 0x1F
+                    if (nalType != 9 && nalType != 7 && nalType != 8) {
+                        out[dst] = ((len ushr 24) and 0xFF).toByte()
+                        out[dst + 1] = ((len ushr 16) and 0xFF).toByte()
+                        out[dst + 2] = ((len ushr 8) and 0xFF).toByte()
+                        out[dst + 3] = (len and 0xFF).toByte()
+                        System.arraycopy(payload, start, out, dst + 4, len)
+                        dst += 4 + len
+                    }
+                }
+                i = end
+            } else {
+                i++
+            }
+        }
+        return out
     }
 
     private fun stripStartCode(bytes: ByteArray): ByteArray {

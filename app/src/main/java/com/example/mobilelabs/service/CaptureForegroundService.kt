@@ -52,14 +52,41 @@ class CaptureForegroundService : Service() {
     private var virtualDisplay: VirtualDisplay? = null
     private var overlay: FloatingApertureOverlay? = null
     private var lastDensityDpi: Int = DisplayMetrics.DENSITY_DEFAULT
+    private var lastDisplayWidthPx: Int = 0
+    private var lastDisplayHeightPx: Int = 0
     private var activeUseMic: Boolean = false
     private var activeUseCam: Boolean = false
+    private var displayListenerRegistered: Boolean = false
 
     private val screenOffReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == Intent.ACTION_SCREEN_OFF) {
                 val app = application as MobileLabsApp
                 app.sessionController.onScreenLocked()
+            }
+        }
+    }
+
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = Unit
+        override fun onDisplayRemoved(displayId: Int) = Unit
+        override fun onDisplayChanged(displayId: Int) {
+            if (displayId != android.view.Display.DEFAULT_DISPLAY || virtualDisplay == null) return
+            val info = DisplayGeometryCompat.readDefaultDisplay(this@CaptureForegroundService)
+            if (info.widthPx > 0 && info.heightPx > 0 &&
+                (info.widthPx != lastDisplayWidthPx || info.heightPx != lastDisplayHeightPx)
+            ) {
+                lastDisplayWidthPx = info.widthPx
+                lastDisplayHeightPx = info.heightPx
+                runCatching {
+                    virtualDisplay?.resize(
+                        info.widthPx,
+                        info.heightPx,
+                        lastDensityDpi.coerceAtLeast(DisplayMetrics.DENSITY_MEDIUM)
+                    )
+                }
+                val app = application as MobileLabsApp
+                app.sessionController.onCapturedContentResized(info.widthPx, info.heightPx)
             }
         }
     }
@@ -73,6 +100,8 @@ class CaptureForegroundService : Service() {
 
         override fun onCapturedContentResize(width: Int, height: Int) {
             if (width > 0 && height > 0) {
+                lastDisplayWidthPx = width
+                lastDisplayHeightPx = height
                 runCatching {
                     virtualDisplay?.resize(width, height, lastDensityDpi.coerceAtLeast(DisplayMetrics.DENSITY_MEDIUM))
                 }
@@ -227,6 +256,16 @@ class CaptureForegroundService : Service() {
         val displayInfo = DisplayGeometryCompat.readDefaultDisplay(this)
         val densityDpi = resources.displayMetrics.densityDpi.coerceAtLeast(DisplayMetrics.DENSITY_MEDIUM)
         lastDensityDpi = densityDpi
+        lastDisplayWidthPx = displayInfo.widthPx
+        lastDisplayHeightPx = displayInfo.heightPx
+
+        if (!displayListenerRegistered) {
+            val dm = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+            if (dm != null) {
+                dm.registerDisplayListener(displayListener, mainHandler)
+                displayListenerRegistered = true
+            }
+        }
 
         app.sessionController.attachArmedProjection(
             mediaProjection = proj,
@@ -245,6 +284,8 @@ class CaptureForegroundService : Service() {
         densityDpi: Int
     ) {
         lastDensityDpi = densityDpi.coerceAtLeast(DisplayMetrics.DENSITY_MEDIUM)
+        lastDisplayWidthPx = canvasWidth
+        lastDisplayHeightPx = canvasHeight
         runCatching { virtualDisplay?.release() }
         virtualDisplay = proj.createVirtualDisplay(
             "OBSmobile-Canvas",
@@ -259,6 +300,13 @@ class CaptureForegroundService : Service() {
     }
 
     private fun releaseVirtualDisplayAndProjection() {
+        if (displayListenerRegistered) {
+            val dm = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+            runCatching { dm?.unregisterDisplayListener(displayListener) }
+            displayListenerRegistered = false
+        }
+        lastDisplayWidthPx = 0
+        lastDisplayHeightPx = 0
         runCatching { virtualDisplay?.release() }
         virtualDisplay = null
         runCatching {

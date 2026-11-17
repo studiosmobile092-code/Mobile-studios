@@ -1,6 +1,6 @@
 # Software Bill of Materials (SBOM) & Licensing Notices
 
-Mobile Labs distributes an `libobs`-based application under **GPL-2.0-or-later**.
+OBSmobile distributes a `libobs`-based application under **GPL-2.0-or-later**.
 
 | Component | Version / Pinned Ref | Licence | Modified? | Linkage | Redistributable |
 |---|---|---|---|---|---|

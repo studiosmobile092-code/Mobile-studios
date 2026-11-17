@@ -2,7 +2,7 @@ package com.example.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// Classic OBS Studio Dark Palette (1:1 faithful to OBS Studio desktop UI) + Mobile Labs Aperture Red
+// Classic OBS Studio Dark Palette (1:1 faithful to OBS Studio desktop UI) + OBSmobile Aperture Red
 val ApertureRed = Color(0xFF720000)
 val ApertureRedHi = Color(0xFFA30000)
 

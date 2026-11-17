@@ -253,7 +253,7 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         onMediaErrorCallback = onMediaError
         lastStatsWindowNs = SystemClock.elapsedRealtimeNanos()
 
-        val thread = HandlerThread("MobileLabs-GLES", Process.THREAD_PRIORITY_DISPLAY)
+        val thread = HandlerThread("OBSmobile-GLES", Process.THREAD_PRIORITY_DISPLAY)
         thread.start()
         glThread = thread
         val handler = Handler(thread.looper)
@@ -1475,7 +1475,7 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
             existing.lastUsedFrame = renderFrameCounter
             return existing
         }
-        val text = src.textContent.ifBlank { "Mobile Labs" }
+        val text = src.textContent.ifBlank { "OBS Mobile" }
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = src.textColorArgb.toInt()
             textSize = src.textSizeSp.coerceIn(14f, 120f) * 1.4f

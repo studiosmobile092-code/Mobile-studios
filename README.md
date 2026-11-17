@@ -1,4 +1,4 @@
-# Mobile Labs
+# OBSmobile (OBS Mobile)
 
 **OBS-powered live streaming and local recording for Android tablets**, pairing the `libobs` C/C++ architecture (`obs-studio` 32.2.1 baseline) with a native Kotlin + Jetpack Compose 1:1 OBS Studio Classic Dark tablet workspace engineered for the **Samsung Galaxy Tab A9+ (8 GB, Android 16)**.
 
@@ -20,24 +20,22 @@
 ## Build Unified APK & XAPK in GitHub Actions (1-Click)
 
 1. Open your repository on GitHub and click the **Actions** tab.
-2. Select **Mobile Labs Android CI** -> **Run workflow** (or push to `main` / `master` / `develop`).
+2. Select **OBSmobile Android CI** -> **Run workflow** (or push to `main` / `master` / `develop`).
 3. Choose:
    - **`build_variant`**: `both` (Debug + Release), `debug`, or `release`
    - **`package_xapk`**: `true` to also generate installable `.xapk` bundles via `scripts/package_xapk.sh`
-4. Download the single-APK/XAPK artifacts from **Test, Lint & Package APK / XAPK**:
-   - **`mobile-labs-debug-apk-xapk`**: `mobile-labs-debug.apk`, `mobile-labs-debug.xapk`, and `sha256.txt`
-   - **`mobile-labs-release-apk-xapk`**: `mobile-labs-release.apk`, `mobile-labs-release.xapk`, and `sha256.txt` *(uses optional repo secrets `KEYSTORE_B64`, `STORE_PASSWORD`, `KEY_PASSWORD`, or an ephemeral CI upload keystore when secrets are unset)*
+4. Download the unified single-APK/XAPK artifacts from **Build Native libobs, Test, Lint & Package Unified APK / XAPK**:
+   - **`obsmobile-debug-apk-xapk`**: `obsmobile-debug.apk`, `obsmobile-debug.xapk`, and `sha256.txt` (includes `lib/arm64-v8a/libobs.so` & `lib/arm64-v8a/libmobilelabs_obs.so`)
+   - **`obsmobile-release-apk-xapk`**: `obsmobile-release.apk`, `obsmobile-release.xapk`, and `sha256.txt` *(uses optional repo secrets `KEYSTORE_B64`, `STORE_PASSWORD`, `KEY_PASSWORD`, or an ephemeral CI upload keystore when secrets are unset)*
 
-## Native `libobs` & Local WSL2 / Linux Build
+## Native `libobs` (`arm64-v8a`) & Local WSL2 / Linux Build
 
-Upstream `obs-studio` 32.2.1 does not support Android NDK cross-compilation (forcing `OS_LINUX` expects KDE ECM, `libuuid`, X11/XCB/GLX, Wayland/EGL, D-Bus, PulseAudio/PipeWire, mbedTLS, `pthread_cancel`, and `execinfo.h`). Mobile Labs production capture, GPU compositing, hardware encoding, and RTMPS streaming run on the Android-native pipeline (`MediaProjection` + `GlZeroCopyCompositor` + `AudioCaptureMixer` + `MediaCodec` + `RtmpFlvSender`).
+Upstream `obs-studio` 32.2.1 does not officially support Android NDK cross-compilation (its default Linux build expects KDE ECM, `libuuid`, X11/XCB/GLX, Wayland/EGL, D-Bus, PulseAudio/PipeWire, mbedTLS, `pthread_cancel`, and `execinfo.h`). `scripts/fetch_and_build_obs.sh` builds static Jansson (`v2.14`) and minimal static FFmpeg (`n6.1.2`), stages SIMDe + Uthash, generates `obsconfig.h`, and cross-compiles core `libobs.so` (`arm64-v8a`) using the Android NDK via `app/src/main/cpp/obs_android_libobs/CMakeLists.txt`. Live compositing, capture, encoding, and RTMPS output run on the Android-native GLES3 + MediaCodec + AudioPlaybackCapture + RtmpFlvSender pipeline.
 
 ```bash
+export ANDROID_NDK_HOME=/path/to/android-ndk
+bash scripts/fetch_and_build_obs.sh
 bash scripts/build_wsl2.sh
 # Package any APK as XAPK locally:
-bash scripts/package_xapk.sh app/build/outputs/apk/debug/app-debug.apk 3 1.0.0-rc1 app-debug.xapk
-# Optional custom Android-ported libobs fork:
-export ANDROID_NDK_HOME=/path/to/android-ndk
-export OBS_ANDROID_FORK_DIR=/path/to/obs-android-fork
-BUILD_LIBOBS=1 bash scripts/build_wsl2.sh
+bash scripts/package_xapk.sh app/build/outputs/apk/debug/app-debug.apk 3 1.0.0-rc1 obsmobile-debug.xapk
 ```

@@ -5,7 +5,7 @@
 | Component | Truth Label | Verified Status |
 |---|---|---|
 | `obsproject/obs-studio` 32.2.1 (`57bfcf10a`) | `CONFIRMED-SOURCE` | Pinned baseline for `libobs` C/C++ engine (`arm64-v8a`), `obs-outputs` (`rtmp-stream`), `rtmp-services`, `obs-ffmpeg`. |
-| `cunminF/OBS_for_Android` | `CONFIRMED-SOURCE` | Reference GLES/EGL Android port; Mobile Labs replaces Qt 6.9.3 with native Kotlin/Compose (D3). |
+| `cunminF/OBS_for_Android` | `CONFIRMED-SOURCE` | Reference GLES/EGL Android port; OBSmobile replaces Qt 6.9.3 with native Kotlin/Compose (D3). |
 | AI Studio build sandbox | `MEASURED` | Android SDK 36 + Gradle 9.1.1 present; Kotlin/Compose APK & Robolectric tests run locally; CI (`android-ci.yml`) compiles full `libobs` `.so`. |
 | Galaxy Tab A9+ hardware telemetry | `UNMEASURED` (awaiting Owner Test Pass 2) | `DeviceAndCodecProbe` + HUD GLES/DSP microsecond timers bundled to measure Adreno 619 & Snapdragon 695 headroom. |
 

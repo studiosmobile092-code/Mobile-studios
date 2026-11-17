@@ -268,7 +268,7 @@ class PlatformConnectionCoordinator(
                 broadcasterId = setup.broadcasterId,
                 ingestUrl = setup.ingestUrl,
                 streamKey = setup.streamKey,
-                streamTitle = setup.streamTitle.ifBlank { "Mobile Labs Live Stream" },
+                streamTitle = setup.streamTitle.ifBlank { "OBSmobile Live Stream" },
                 categoryId = setup.categoryId,
                 categoryName = setup.categoryName.ifBlank { "Games + Demos" },
                 enabledForMultiStream = true

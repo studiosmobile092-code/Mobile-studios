@@ -15,7 +15,7 @@
 #include <thread>
 #include <vector>
 
-#define ML_TAG "MobileLabsObsEnc"
+#define ML_TAG "OBSmobileObsEnc"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, ML_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, ML_TAG, __VA_ARGS__)
 
@@ -191,7 +191,7 @@ bool ensure_egl_surface_and_gl(MobileLabsMediaCodecEncoder *ctx) {
 }
 
 const char *ml_enc_get_name(void *) {
-    return "Mobile Labs Hardware MediaCodec H.264 (Zero-Copy)";
+    return "OBSmobile Hardware MediaCodec H.264 (Zero-Copy)";
 }
 
 void ml_enc_get_defaults(obs_data_t *settings) {

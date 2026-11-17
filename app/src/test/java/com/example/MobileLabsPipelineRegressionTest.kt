@@ -10,8 +10,10 @@ import com.example.mobilelabs.media.MediaSourceDecoder
 import com.example.mobilelabs.media.RecordingPtsRebaser
 import com.example.mobilelabs.media.ReplayGopRingBuffer
 import com.example.mobilelabs.media.RtmpProtocolParser
+import android.view.Surface
 import com.example.mobilelabs.model.AudioFilterConfig
 import com.example.mobilelabs.model.FacecamShape
+import com.example.mobilelabs.model.MobileLabsUiState
 import com.example.mobilelabs.model.RecordingFormat
 import com.example.mobilelabs.model.SceneCollection
 import com.example.mobilelabs.model.SceneModel
@@ -19,10 +21,12 @@ import com.example.mobilelabs.model.SourceType
 import com.example.mobilelabs.model.StreamingPlatform
 import com.example.mobilelabs.model.VideoConfig
 import com.example.mobilelabs.model.VoiceEffectPreset
+import com.example.mobilelabs.model.defaultSceneCollection
 import com.example.mobilelabs.persistence.ObsJsonImporterExporter
 import com.example.mobilelabs.persistence.SceneCollectionRepository
 import com.example.mobilelabs.platform.OAuthPkceManager
 import com.example.mobilelabs.platform.TwitchIrcChatClient
+import com.example.mobilelabs.probes.DisplayGeometryCompat
 import com.example.mobilelabs.security.KeystoreSecretStore
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -382,5 +386,78 @@ class MobileLabsPipelineRegressionTest {
 
         val tokenQuery = KeystoreSecretStore.redactUrlAndKeys("oauth:abc999 token=xyz789")
         assertEquals("oauth:[REDACTED] token=[REDACTED]", tokenQuery)
+    }
+
+    @Test
+    fun `RecordingPtsRebaser synchronizes mismatched wall-clock video and zero-based AAC audio epochs across pause`() {
+        val rebaser = RecordingPtsRebaser()
+        // Video starts at monotonic uptime 1_000_000_000 us; AAC audio starts at 0 us
+        assertEquals(0L, rebaser.filterAndRebase(trackSlot = 0, isVideo = true, isKey = true, rawPtsUs = 1_000_000_000L))
+        assertEquals(0L, rebaser.filterAndRebase(trackSlot = 1, isVideo = false, isKey = false, rawPtsUs = 0L))
+        assertEquals(21_333L, rebaser.filterAndRebase(trackSlot = 1, isVideo = false, isKey = false, rawPtsUs = 21_333L))
+        assertEquals(16_667L, rebaser.filterAndRebase(trackSlot = 0, isVideo = true, isKey = false, rawPtsUs = 1_000_016_667L))
+
+        // Pause for 5 seconds
+        rebaser.pause(currentRawPtsUs = 1_000_020_000L)
+        assertEquals(5_000L, rebaser.totalPausedDurationMs(nowWallUs = 1_005_020_000L))
+        rebaser.resume(currentRawPtsUs = 1_005_020_000L)
+        assertEquals(5_000L, rebaser.totalPausedDurationMs())
+
+        // Both tracks anchor smoothly onto the resumed monotonic timeline regardless of separate clocks
+        val resumedVideoPts = rebaser.filterAndRebase(trackSlot = 0, isVideo = true, isKey = true, rawPtsUs = 1_005_030_000L)
+        val resumedAudioPts = rebaser.filterAndRebase(trackSlot = 1, isVideo = false, isKey = false, rawPtsUs = 5_030_000L)
+        assertEquals(resumedVideoPts, resumedAudioPts)
+        assertTrue(resumedVideoPts >= 42_666L)
+    }
+
+    @Test
+    fun `ReplayGopRingBuffer calculates span from video clock without evicting packets on mismatched audio epoch`() {
+        val ring = ReplayGopRingBuffer(maxBytes = 1024L * 1024L)
+        ring.configure(enabled = true, durationSec = 30)
+
+        // Video wall-clock at ~1000s alongside 0-based AAC audio samples
+        ring.pushSample(isVideo = true, isKey = true, ptsUs = 1_000_000_000L, flags = 1, payload = ByteArray(128))
+        ring.pushSample(isVideo = false, isKey = false, ptsUs = 0L, flags = 0, payload = ByteArray(32))
+        ring.pushSample(isVideo = true, isKey = false, ptsUs = 1_005_000_000L, flags = 0, payload = ByteArray(64))
+        ring.pushSample(isVideo = false, isKey = false, ptsUs = 5_000_000L, flags = 0, payload = ByteArray(32))
+
+        val stats = ring.stats()
+        assertEquals(5.0f, stats.bufferedSeconds, 0.01f)
+        val clip = ring.extractAlignedClipSamples()
+        assertEquals(4, clip.size)
+        assertTrue(clip.first().isVideo && clip.first().isKey)
+    }
+
+    @Test
+    fun `DisplayGeometryCompat swaps portrait tablet panel dimensions to landscape on 90deg or 270deg rotation`() {
+        val (w90, h90) = DisplayGeometryCompat.resolveOrientedDimensions(
+            physWidth = 1200,
+            physHeight = 1920,
+            logicalWidth = 1920,
+            logicalHeight = 1200,
+            rotation = Surface.ROTATION_90
+        )
+        assertEquals(1920, w90)
+        assertEquals(1200, h90)
+
+        val (wPortrait, hPortrait) = DisplayGeometryCompat.resolveOrientedDimensions(
+            physWidth = 1200,
+            physHeight = 1920,
+            logicalWidth = 1200,
+            logicalHeight = 1920,
+            rotation = Surface.ROTATION_0
+        )
+        assertEquals(1200, wPortrait)
+        assertEquals(1920, hPortrait)
+    }
+
+    @Test
+    fun `OBSmobile default UI state and scene collection use branded OBS Mobile defaults`() {
+        val state = MobileLabsUiState()
+        assertEquals(false, state.isInitializing)
+        assertEquals(1.0f, state.loadingProgress, 0.001f)
+        val collection = defaultSceneCollection()
+        val brbText = collection.scenes.flatMap { it.sources }.firstOrNull { it.id == "src_brb_text" }?.textContent
+        assertEquals("BE RIGHT BACK · OBS MOBILE", brbText)
     }
 }

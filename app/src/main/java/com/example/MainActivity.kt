@@ -337,7 +337,7 @@ class MainActivity : ComponentActivity() {
                         onCreateOrDupCollection = controller::createOrDuplicateCollection,
                         onSwitchCollection = controller::switchNamedCollection,
                         onDeleteCollection = controller::deleteNamedCollection,
-                        onExportObsJson = { exportObsJsonLauncher.launch("mobile_labs_collection.obs.json") },
+                        onExportObsJson = { exportObsJsonLauncher.launch("obsmobile_collection.obs.json") },
                         onImportObsJson = { importObsJsonLauncher.launch(arrayOf("application/json", "*/*")) },
                         onRequestEnableOverlay = { enable ->
                             if (enable && !Settings.canDrawOverlays(this)) {

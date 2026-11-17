@@ -332,7 +332,7 @@ class RtmpFlvSender(
         pendingAudioSeq = audioSeqHeader
         worker = Thread({
             runSession()
-        }, "MobileLabs-RTMP").apply { start() }
+        }, "OBSmobile-RTMP").apply { start() }
     }
 
     fun updateVideoConfig(avccConfig: ByteArray) {
@@ -510,7 +510,7 @@ class RtmpFlvSender(
                     createStreamLatch.countDown()
                     publishLatch.countDown()
                 }
-            }, "MobileLabs-RTMP-Rx").apply { isDaemon = true; start() }
+            }, "OBSmobile-RTMP-Rx").apply { isDaemon = true; start() }
 
             // Issue SetChunkSize + connect + createStream, wait for negotiated streamId, then publish
             synchronized(writeLock) {
@@ -712,7 +712,7 @@ class RtmpFlvSender(
         writeAmfNumProp(amf, "videodatarate", videoBitrateKbps.toDouble())
         writeAmfNumProp(amf, "audiocodecid", 10.0)
         writeAmfNumProp(amf, "audiodatarate", audioBitrateKbps.toDouble())
-        writeAmfProp(amf, "encoder", "Mobile Labs (MediaCodec/GLES3)")
+        writeAmfProp(amf, "encoder", "OBSmobile (MediaCodec/GLES3)")
         writeAmfObjectEnd(amf)
         writeRtmpChunk(out, csid = 4, msgTypeId = 18, streamId = streamId, ts = 0, payload = amf.toByteArray())
     }

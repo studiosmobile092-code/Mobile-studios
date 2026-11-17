@@ -11,6 +11,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -29,6 +30,7 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -42,6 +44,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -49,7 +52,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -99,7 +101,6 @@ import com.example.ui.theme.StatusWarn
 import com.example.ui.theme.StudioText
 import com.example.ui.theme.StudioTextDim
 import com.example.ui.theme.SurfaceLevel1
-import kotlinx.coroutines.delay
 import java.util.Locale
 
 data class WorkspaceCallbacks(
@@ -223,7 +224,6 @@ fun WorkspaceScreen(
     state: MobileLabsUiState,
     callbacks: WorkspaceCallbacks
 ) {
-    var showSplash by remember { mutableStateOf(true) }
     var docksCollapsed by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var showDiagnostics by remember { mutableStateOf(false) }
@@ -245,11 +245,6 @@ fun WorkspaceScreen(
     var showPrecisionNudge by remember { mutableStateOf(false) }
     var showConnections by remember { mutableStateOf(false) }
     var showProTools by remember { mutableStateOf(false) }
-
-    LaunchedEffect(Unit) {
-        delay(900L)
-        showSplash = false
-    }
 
     val liveOrRec = state.sessionPhase == SessionPhase.LIVE ||
         state.recordingPhase == RecordingPhase.RECORDING ||
@@ -411,22 +406,49 @@ fun WorkspaceScreen(
             )
         }
 
-        AnimatedVisibility(visible = showSplash, exit = fadeOut(animationSpec = tween(durationMillis = 320))) {
-            Box(modifier = Modifier.fillMaxSize().background(ApertureRed), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Image(painter = painterResource(R.drawable.mobile_labs_logo), contentDescription = "OBSmobile logo", modifier = Modifier.size(148.dp))
-                    Spacer(Modifier.height(10.dp))
+        AnimatedVisibility(visible = state.isInitializing, exit = fadeOut(animationSpec = tween(durationMillis = 320))) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(ApertureRed)
+                    .testTag("loading_screen"),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(horizontal = 24.dp)
+                ) {
+                    Image(
+                        painter = painterResource(R.drawable.mobile_labs_logo),
+                        contentDescription = "OBS Mobile logo",
+                        modifier = Modifier.size(148.dp)
+                    )
+                    Spacer(Modifier.height(12.dp))
                     Text(
-                        "OBSmobile",
-                        style = MaterialTheme.typography.headlineSmall,
+                        text = "OBS Mobile",
+                        style = MaterialTheme.typography.headlineMedium,
                         color = StudioText,
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "Live streaming & recording",
+                        text = "Live streaming & recording studio",
                         style = MaterialTheme.typography.bodySmall,
                         color = StudioText.copy(alpha = 0.85f)
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    val pct = (state.loadingProgress.coerceIn(0f, 1f) * 100f).toInt()
+                    LinearProgressIndicator(
+                        progress = { state.loadingProgress.coerceIn(0f, 1f) },
+                        modifier = Modifier.width(260.dp).height(6.dp),
+                        color = StudioText,
+                        trackColor = StudioText.copy(alpha = 0.25f)
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "$pct% · ${state.loadingStatusText}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = StudioText.copy(alpha = 0.90f)
                     )
                 }
             }
@@ -730,6 +752,7 @@ private fun ObsTopMenuBar(
             .height(30.dp)
             .background(ObsWindowBg)
             .border(0.5.dp, ObsBorder)
+            .horizontalScroll(rememberScrollState())
             .padding(horizontal = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(2.dp)
@@ -797,7 +820,7 @@ private fun ObsTopMenuBar(
             DropdownMenuItem(text = { Text("About OBSmobile & GPL-2.0 Source Offer", fontSize = 12.sp, color = StudioText) }, onClick = { openMenu = null; onOpenAbout() })
         }
 
-        Spacer(Modifier.weight(1f))
+        Spacer(Modifier.width(12.dp))
 
         // Compact Pro Quick Action Pills (OBS Header Bar)
         val connectedCount = listOf(state.youtubeConnection.connected, state.twitchConnection.connected).count { it }
@@ -1039,75 +1062,76 @@ private fun ObsPreviewStage(
                     Text("PROGRAM", fontSize = 10.sp, color = StudioText, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
                 }
             }
-        }
 
-        val showNudgeOverlay = !state.drawingModeActive && (showPrecisionNudge ||
-            (selectedSrc != null && selectedSrc.type.isVisual && selectedSrc.type != SourceType.SCREEN_CAPTURE && !selectedSrc.locked))
-        if (showNudgeOverlay && selectedSrc != null && selectedSrc.type.isVisual) {
-            SelectedSourceNudgeBar(
-                source = selectedSrc,
-                blockedLive = isTouchBlockedLive,
-                onNudge = callbacks.onNudgeSource,
-                onFitToScreen = callbacks.onFitSelectedToScreen,
-                modifier = Modifier.align(Alignment.BottomStart).padding(8.dp)
-            )
-        }
-
-        if (state.drawingModeActive) {
-            Row(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(8.dp)
-                    .background(Color(0xE616161A), RoundedCornerShape(6.dp))
-                    .border(1.dp, StatusWarn, RoundedCornerShape(6.dp))
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Text("INK MODE", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = StatusWarn)
-                listOf(0xFFFF3B30L, 0xFFF5A524L, 0xFF43B581L, 0xFF56B4E9L, 0xFFFFFFFFL).forEach { col ->
-                    Box(
-                        modifier = Modifier
-                            .size(20.dp)
-                            .background(Color(col.toInt()), CircleShape)
-                            .border(if (state.drawingColorArgb == col) 2.dp else 0.5.dp, Color.White, CircleShape)
-                            .clickable { callbacks.onSetDrawingBrush(col, state.drawingBrushWidthFraction) }
-                    )
-                }
-                TextButton(onClick = callbacks.onUndoDrawingStroke) { Text("Undo", fontSize = 11.sp, color = StudioText) }
-                TextButton(onClick = callbacks.onClearDrawingStrokes) { Text("Clear", fontSize = 11.sp, color = ApertureRedHi) }
-                Button(
-                    onClick = { callbacks.onSetDrawingMode(false) },
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = ObsSelectionBlue),
-                    modifier = Modifier.height(26.dp)
-                ) { Text("Done", fontSize = 11.sp, color = StudioText) }
-            }
-        }
-
-        state.activeAlertEvent?.let { ev ->
-            Surface(
-                color = Color(ev.type.accentArgb.toInt()).copy(alpha = 0.90f),
-                shape = RoundedCornerShape(4.dp),
-                modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp)
-            ) {
-                Text(
-                    text = "${ev.type.label}: ${ev.senderName}",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+            val showNudgeOverlay = !state.drawingModeActive && (showPrecisionNudge ||
+                (selectedSrc != null && selectedSrc.type.isVisual && selectedSrc.type != SourceType.SCREEN_CAPTURE && !selectedSrc.locked))
+            if (showNudgeOverlay && selectedSrc != null && selectedSrc.type.isVisual) {
+                SelectedSourceNudgeBar(
+                    source = selectedSrc,
+                    blockedLive = isTouchBlockedLive,
+                    onNudge = callbacks.onNudgeSource,
+                    onFitToScreen = callbacks.onFitSelectedToScreen,
+                    modifier = Modifier.align(Alignment.BottomStart).padding(8.dp)
                 )
             }
-        }
 
-        if (hudExpanded) {
-            DiagnosticsHudCard(
-                state = state,
-                onExport = callbacks.onExportDiagnostics,
-                onOpenFullProbes = onOpenDiagnostics,
-                modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)
-            )
+            if (state.drawingModeActive) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(8.dp)
+                        .background(Color(0xE616161A), RoundedCornerShape(6.dp))
+                        .border(1.dp, StatusWarn, RoundedCornerShape(6.dp))
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("INK MODE", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = StatusWarn)
+                    listOf(0xFFFF3B30L, 0xFFF5A524L, 0xFF43B581L, 0xFF56B4E9L, 0xFFFFFFFFL).forEach { col ->
+                        Box(
+                            modifier = Modifier
+                                .size(24.dp)
+                                .background(Color(col.toInt()), CircleShape)
+                                .border(if (state.drawingColorArgb == col) 2.dp else 0.5.dp, Color.White, CircleShape)
+                                .clickable { callbacks.onSetDrawingBrush(col, state.drawingBrushWidthFraction) }
+                        )
+                    }
+                    TextButton(onClick = callbacks.onUndoDrawingStroke) { Text("Undo", fontSize = 11.sp, color = StudioText) }
+                    TextButton(onClick = callbacks.onClearDrawingStrokes) { Text("Clear", fontSize = 11.sp, color = ApertureRedHi) }
+                    Button(
+                        onClick = { callbacks.onSetDrawingMode(false) },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = ObsSelectionBlue),
+                        modifier = Modifier.height(26.dp)
+                    ) { Text("Done", fontSize = 11.sp, color = StudioText) }
+                }
+            }
+
+            state.activeAlertEvent?.let { ev ->
+                Surface(
+                    color = Color(ev.type.accentArgb.toInt()).copy(alpha = 0.90f),
+                    shape = RoundedCornerShape(4.dp),
+                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp)
+                ) {
+                    Text(
+                        text = "${ev.type.label}: ${ev.senderName}",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
+            if (hudExpanded) {
+                DiagnosticsHudCard(
+                    state = state,
+                    onExport = callbacks.onExportDiagnostics,
+                    onOpenFullProbes = onOpenDiagnostics,
+                    modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)
+                )
+            }
         }
     }
 }

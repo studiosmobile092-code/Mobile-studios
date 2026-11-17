@@ -289,7 +289,7 @@ class SceneCollectionRepository(private val context: Context) {
                                     mediaLoop = srcObj.optBoolean("mediaLoop", true),
                                     mediaMuted = srcObj.optBoolean("mediaMuted", false),
                                     mediaPlaying = srcObj.optBoolean("mediaPlaying", true),
-                                    textContent = srcObj.optString("textContent", "Mobile Labs Stream"),
+                                    textContent = srcObj.optString("textContent", "OBSmobile Stream"),
                                     textColorArgb = srcObj.optLong("textColorArgb", 0xFFFFFFFFL),
                                     textBgColorArgb = srcObj.optLong("textBgColorArgb", 0x9916161AL),
                                     textSizeSp = srcObj.optDouble("textSizeSp", 44.0).toFloat(),
@@ -477,7 +477,7 @@ class SceneCollectionRepository(private val context: Context) {
                         add(
                             com.example.mobilelabs.model.BenchmarkRecord(
                                 id = b.optString("id", "bench_$i"),
-                                appName = b.optString("appName", "Mobile Labs"),
+                                appName = b.optString("appName", "OBSmobile"),
                                 presetLabel = b.optString("presetLabel", "Balanced 720p60"),
                                 gameName = b.optString("gameName", "Geometry Dash"),
                                 gameAvgFps = b.optDouble("gameAvgFps", 0.0).toFloat(),

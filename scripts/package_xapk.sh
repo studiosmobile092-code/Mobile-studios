@@ -47,7 +47,7 @@ total_size = os.path.getsize(apk_full)
 manifest = {
     "xapk_version": 2,
     "package_name": "com.mobilelabs.studio",
-    "name": "Mobile Labs",
+    "name": "OBSmobile",
     "version_code": str(version_code),
     "version_name": str(version_name),
     "min_sdk_version": "29",

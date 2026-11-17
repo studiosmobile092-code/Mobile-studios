@@ -40,7 +40,7 @@
    - Create a second **Profile** (e.g. `Low Overhead Practice`) and switch between profiles.
    - Tap **Export OBS JSON** and inspect exported JSON -> confirm **zero stream keys / RTMP secrets** exist anywhere in JSON.
    - Re-import the exported OBS JSON -> confirm scenes, sources, and filters restore cleanly.
-2. Open **Settings -> Output -> Pick Recording Folder (SAF)** or use default **Movies/Mobile Labs**.
+2. Open **Settings -> Output -> Pick Recording Folder (SAF)** or use default **Movies/OBSmobile**.
 
 ## Test 6 — Floating Aperture Control v2 Over Geometry Dash & osu! (M2.6)
 1. Enable **Floating Aperture Control** in **Settings -> Advanced** (after reviewing rationale dialog).

@@ -14,6 +14,9 @@ import kotlin.math.max
  * Memory-bounded encoded GOP ring buffer for OBS-style Instant Replay Buffer.
  * Captures packets from the shared H.264/AAC MediaCodec output with zero extra encode cost,
  * automatically evicting oldest complete GOPs beyond [targetDurationSec] or [maxBytes].
+ *
+ * Uses video timestamps specifically for window span calculation so hardware AAC codecs
+ * that emit 0-based sample-count PTS do not desync window pruning from wall-clocked video.
  */
 class ReplayGopRingBuffer(
     private val maxBytes: Long = 32L * 1024L * 1024L
@@ -67,10 +70,19 @@ class ReplayGopRingBuffer(
     }
 
     fun stats(): SnapshotStats = synchronized(lock) {
-        if (packets.size < 2) return SnapshotStats(0f, 0L)
-        val firstUs = packets.first().ptsUs
-        val lastUs = packets.last().ptsUs
-        val sec = ((lastUs - firstUs).coerceAtLeast(0L) / 1_000_000f)
+        var firstVideoUs = -1L
+        var lastVideoUs = -1L
+        for (p in packets) {
+            if (p.isVideo) {
+                if (firstVideoUs < 0L) firstVideoUs = p.ptsUs
+                lastVideoUs = p.ptsUs
+            }
+        }
+        val sec = if (firstVideoUs >= 0L && lastVideoUs > firstVideoUs) {
+            (lastVideoUs - firstVideoUs) / 1_000_000f
+        } else {
+            0f
+        }
         SnapshotStats(bufferedSeconds = sec, bufferedKb = totalBytes / 1024L)
     }
 
@@ -86,10 +98,28 @@ class ReplayGopRingBuffer(
         totalBytes = 0L
     }
 
+    private fun latestVideoPtsLocked(): Long {
+        val it = packets.descendingIterator()
+        while (it.hasNext()) {
+            val s = it.next()
+            if (s.isVideo) return s.ptsUs
+        }
+        return -1L
+    }
+
+    private fun firstVideoPtsLocked(): Long {
+        for (s in packets) {
+            if (s.isVideo) return s.ptsUs
+        }
+        return -1L
+    }
+
     private fun pruneLocked() {
         val maxWindowUs = (targetDurationSec.toLong() + 4L) * 1_000_000L
         while (packets.size > 2) {
-            val spanUs = packets.last().ptsUs - packets.first().ptsUs
+            val firstV = firstVideoPtsLocked()
+            val lastV = latestVideoPtsLocked()
+            val spanUs = if (firstV >= 0L && lastV > firstV) lastV - firstV else 0L
             if (spanUs <= maxWindowUs && totalBytes <= maxBytes) break
 
             // Pop oldest packet, and keep popping until we land on the next video IDR keyframe
@@ -98,7 +128,7 @@ class ReplayGopRingBuffer(
             while (packets.isNotEmpty()) {
                 val head = packets.first()
                 if (head.isVideo && head.isKey &&
-                    (packets.last().ptsUs - head.ptsUs) <= maxWindowUs &&
+                    (lastV < 0L || (lastV - head.ptsUs) <= maxWindowUs) &&
                     totalBytes <= maxBytes
                 ) {
                     break
@@ -114,10 +144,9 @@ class ReplayGopRingBuffer(
         fun trimToKeyframeAlignedList(raw: List<EncodedSample>): List<EncodedSample> {
             val firstKeyIdx = raw.indexOfFirst { it.isVideo && it.isKey }
             if (firstKeyIdx < 0) return emptyList()
-            val keyPtsUs = raw[firstKeyIdx].ptsUs
-            return raw.drop(firstKeyIdx).filter { sample ->
-                sample.isVideo || sample.ptsUs >= keyPtsUs
-            }
+            // Keep all packets queued from the IDR frame onward (FIFO order already aligns audio & video
+            // without assuming audio/video share the same epoch).
+            return raw.subList(firstKeyIdx, raw.size).toList()
         }
     }
 }
@@ -131,11 +160,12 @@ object ReplayClipMuxer {
         publishFn: (File) -> String?
     ): PublishedRecording? {
         if (samples.isEmpty() || videoFormat == null) return null
-        val outFile = MediaFileAllocator.allocateTimestampedFile(repository.recordingsDir, "Replay", "mp4")
+        val outFile = MediaFileAllocator.allocateTimestampedFile(repository.recordingsDir, "OBSmobile_Replay", "mp4")
 
-        val basePtsUs = samples.first().ptsUs
-        val lastPtsUs = samples.last().ptsUs
-        val durationSec = max(1L, (lastPtsUs - basePtsUs) / 1_000_000L)
+        val firstVideoUs = samples.firstOrNull { it.isVideo }?.ptsUs ?: return null
+        val lastVideoUs = samples.lastOrNull { it.isVideo }?.ptsUs ?: firstVideoUs
+        val firstAudioUs = samples.firstOrNull { !it.isVideo }?.ptsUs ?: -1L
+        val durationSec = max(1L, (lastVideoUs - firstVideoUs) / 1_000_000L)
 
         val muxer = MediaMuxer(outFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
         return try {
@@ -149,7 +179,9 @@ object ReplayClipMuxer {
             for (s in samples) {
                 val track = if (s.isVideo) vTrack else aTrack
                 if (track < 0) continue
-                var pts = (s.ptsUs - basePtsUs).coerceAtLeast(0L)
+                val baseUs = if (s.isVideo) firstVideoUs else firstAudioUs
+                if (baseUs < 0L) continue
+                var pts = (s.ptsUs - baseUs).coerceAtLeast(0L)
                 if (s.isVideo) {
                     if (pts <= lastVUs) pts = lastVUs + 1L
                     lastVUs = pts

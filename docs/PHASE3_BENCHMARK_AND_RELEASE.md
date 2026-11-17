@@ -1,4 +1,4 @@
-# Mobile Labs — Phase 3 Benchmark, Decision & Release Readiness Report
+# OBSmobile — Phase 3 Benchmark, Decision & Release Readiness Report
 
 ## 1. Vulkan Gate V3 — Formal Decision
 - **Decision**: **`KEEP_GLES3_PRODUCTION_DEFAULT`**
@@ -24,9 +24,9 @@
 | **4 GB RAM Android Tablets** | Low-Overhead 720p30 (3.5 Mbps) | **UNTESTED** — Auto-Tune Wizard recommends Low-Overhead automatically below 4.8 GB RAM |
 
 ## 4. Competitive Benchmark Comparison (§14.4)
-No simulated or guessed competitor metrics are included. Run `Tools -> Mobile Labs Benchmark Kit` on-device to record real measurements alongside Prism Live Studio Mobile and Streamlabs Mobile under identical conditions:
+No simulated or guessed competitor metrics are included. Run `Tools -> OBSmobile Benchmark Kit` on-device to record real measurements alongside Prism Live Studio Mobile and Streamlabs Mobile under identical conditions:
 
-| Metric | Mobile Labs (720p60 Balanced) | Prism Live Studio Mobile | Streamlabs Mobile |
+| Metric | OBSmobile (720p60 Balanced) | Prism Live Studio Mobile | Streamlabs Mobile |
 |---|---|---|---|
 | **Game Avg FPS (Geometry Dash)** | `UNMEASURED` (Log on Tab A9+) | `UNTESTED` | `UNTESTED` |
 | **Game 1% Low FPS** | `UNMEASURED` | `UNTESTED` | `UNTESTED` |

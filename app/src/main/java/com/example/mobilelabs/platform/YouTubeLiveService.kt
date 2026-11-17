@@ -98,7 +98,7 @@ class YouTubeLiveService(
                 val startIso = isoFormat.format(Date(System.currentTimeMillis() + 5_000L))
                 val insertPayload = JSONObject().apply {
                     put("snippet", JSONObject().apply {
-                        put("title", title.ifBlank { "Mobile Labs Live Stream" }.take(100))
+                        put("title", title.ifBlank { "OBSmobile Live Stream" }.take(100))
                         put("scheduledStartTime", startIso)
                     })
                     put("status", JSONObject().apply {
@@ -123,7 +123,7 @@ class YouTubeLiveService(
             val liveChatId = broadcastObj.optJSONObject("snippet")?.optString("liveChatId", "").orEmpty()
             var boundStreamId = broadcastObj.optJSONObject("contentDetails")?.optString("boundStreamId", "").orEmpty()
 
-            // 2. Fetch bound stream or create/reuse a persistent Mobile Labs stream key
+            // 2. Fetch bound stream or create/reuse a persistent OBSmobile stream key
             var streamObj = if (boundStreamId.isNotBlank()) {
                 findStreamById(accessToken, boundStreamId)
             } else {
@@ -133,7 +133,7 @@ class YouTubeLiveService(
             if (streamObj == null) {
                 val streamPayload = JSONObject().apply {
                     put("snippet", JSONObject().apply {
-                        put("title", "Mobile Labs RTMP Ingest")
+                        put("title", "OBSmobile RTMP Ingest")
                     })
                     put("cdn", JSONObject().apply {
                         put("frameRate", "variable")
@@ -192,7 +192,7 @@ class YouTubeLiveService(
             val payload = JSONObject().apply {
                 put("id", broadcastId)
                 put("snippet", JSONObject().apply {
-                    put("title", title.ifBlank { "Mobile Labs Live Stream" }.take(100))
+                    put("title", title.ifBlank { "OBSmobile Live Stream" }.take(100))
                 })
                 put("status", JSONObject().apply {
                     put("privacyStatus", privacyStatus.ifBlank { "public" })

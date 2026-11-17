@@ -27,7 +27,7 @@ data class PlatformConnectionState(
     val hasStreamKey: Boolean = false,
     val broadcastId: String = "",
     val liveChatId: String = "",
-    val streamTitle: String = "Mobile Labs Live Stream",
+    val streamTitle: String = "OBSmobile Live Stream",
     val categoryName: String = "Games + Demos",
     val categoryId: String = "",
     val privacyStatus: String = "public",

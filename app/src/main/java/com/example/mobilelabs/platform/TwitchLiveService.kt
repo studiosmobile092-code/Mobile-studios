@@ -82,7 +82,7 @@ class TwitchLiveService(
                     displayName = displayName,
                     ingestUrl = ingestUrl,
                     streamKey = streamKey,
-                    streamTitle = chanObj?.optString("title", "Mobile Labs Live Stream").orEmpty(),
+                    streamTitle = chanObj?.optString("title", "OBSmobile Live Stream").orEmpty(),
                     categoryId = chanObj?.optString("game_id", "").orEmpty(),
                     categoryName = chanObj?.optString("game_name", "Games + Demos").orEmpty()
                 )

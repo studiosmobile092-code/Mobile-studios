@@ -446,7 +446,7 @@ object ObsJsonImporterExporter {
             mediaPathOrUri = rawPath,
             mediaLoop = settings.optBoolean("looping", true),
             mediaMuted = settings.optBoolean("muted", false),
-            textContent = settings.optString("text", "Mobile Labs Stream").take(MAX_TEXT_CHARS),
+            textContent = settings.optString("text", "OBSmobile Stream").take(MAX_TEXT_CHARS),
             textColorArgb = settings.optLong("color1", 0xFFFFFFFFL),
             textBgColorArgb = settings.optLong("bk_color", 0x9916161AL),
             textSizeSp = (settings.optJSONObject("font")?.optDouble("size", 44.0) ?: 44.0).toFloat().coerceIn(14f, 140f),

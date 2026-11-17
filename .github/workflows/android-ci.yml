@@ -1,4 +1,4 @@
-name: Mobile Labs Android CI
+name: OBSmobile Android CI
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       build_variant:
-        description: 'APK & XAPK variant to build'
+        description: 'Unified APK & XAPK variant to build'
         required: true
         default: 'both'
         type: choice
@@ -17,14 +17,14 @@ on:
           - debug
           - release
       package_xapk:
-        description: 'Also package installable .xapk archive'
+        description: 'Also package unified installable .xapk archive'
         required: true
         default: true
         type: boolean
 
 jobs:
   build-android-apk:
-    name: Test, Lint & Package APK / XAPK
+    name: Build Native libobs, Test, Lint & Package Unified APK / XAPK
     runs-on: ubuntu-latest
 
     steps:
@@ -37,17 +37,40 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Set up Android SDK 36
+      - name: Set up Android SDK 36, NDK 27 & CMake
         uses: android-actions/setup-android@v3
         with:
           packages: >
             platforms;android-36
             build-tools;36.0.0
+            ndk;27.2.12479018
+            cmake;3.31.6
+
+      - name: Install Native Build Helpers (Ninja & pkg-config)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build pkg-config
 
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.3.1'
+
+      - name: Cache Native Third-Party Dependencies (Jansson, FFmpeg, OBS)
+        uses: actions/cache@v4
+        with:
+          path: app/src/main/cpp/third_party
+          key: libobs-arm64-${{ hashFiles('scripts/fetch_and_build_obs.sh', 'app/src/main/cpp/obs_android_libobs/**') }}
+          restore-keys: |
+            libobs-arm64-
+
+      - name: Build & Stage Core libobs (arm64-v8a)
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+        run: |
+          chmod +x scripts/fetch_and_build_obs.sh
+          bash scripts/fetch_and_build_obs.sh
+          test -f app/src/main/jniLibs/arm64-v8a/libobs.so
 
       - name: Prepare Debug & Release Keystores
         shell: bash
@@ -70,12 +93,12 @@ jobs:
             echo "STORE_PASSWORD=$SECRET_STORE_PASS" >> "$GITHUB_ENV"
             echo "KEY_PASSWORD=$SECRET_KEY_PASS" >> "$GITHUB_ENV"
           else
-            CI_PASS="mobilelabs-ci-upload"
+            CI_PASS="obsmobile-ci-upload"
             rm -f "$UPLOAD_KS"
             keytool -genkeypair -v -keystore "$UPLOAD_KS" \
               -storepass "$CI_PASS" -alias upload -keypass "$CI_PASS" \
               -keyalg RSA -keysize 2048 -validity 3650 \
-              -dname "CN=Mobile Labs CI,O=Mobile Labs,C=US"
+              -dname "CN=OBSmobile CI,O=OBSmobile,C=US"
             echo "KEYSTORE_PATH=$UPLOAD_KS" >> "$GITHUB_ENV"
             echo "STORE_PASSWORD=$CI_PASS" >> "$GITHUB_ENV"
             echo "KEY_PASSWORD=$CI_PASS" >> "$GITHUB_ENV"
@@ -95,48 +118,52 @@ jobs:
       - name: Run Android Lint
         run: gradle :app:lintDebug --no-daemon
 
-      - name: Assemble Debug APK & Package XAPK
+      - name: Assemble Unified Debug APK & Package XAPK
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_variant != 'release' }}
         run: |
           gradle :app:assembleDebug --no-daemon
           mkdir -p dist/debug
           APK="app/build/outputs/apk/debug/app-debug.apk"
           test -f "$APK"
-          unzip -l "$APK" | grep -E "lib/|classes.*\.dex|AndroidManifest\.xml" || true
-          cp "$APK" dist/debug/mobile-labs-debug.apk
+          unzip -l "$APK" | grep -E "lib/|classes.*\.dex|AndroidManifest\.xml"
+          unzip -l "$APK" | grep -q "lib/arm64-v8a/libobs.so"
+          unzip -l "$APK" | grep -q "lib/arm64-v8a/libmobilelabs_obs.so"
+          cp "$APK" dist/debug/obsmobile-debug.apk
           if [ "${{ inputs.package_xapk }}" != "false" ]; then
             chmod +x scripts/package_xapk.sh
-            bash scripts/package_xapk.sh "$APK" "${{ steps.ver.outputs.code }}" "${{ steps.ver.outputs.name }}" "dist/debug/mobile-labs-debug.xapk"
+            bash scripts/package_xapk.sh "$APK" "${{ steps.ver.outputs.code }}" "${{ steps.ver.outputs.name }}" "dist/debug/obsmobile-debug.xapk"
           fi
           sha256sum dist/debug/* | tee dist/debug/sha256.txt
 
-      - name: Assemble Release APK & Package XAPK
+      - name: Assemble Unified Release APK & Package XAPK
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_variant != 'debug' }}
         run: |
           gradle :app:assembleRelease --no-daemon
           mkdir -p dist/release
           APK="app/build/outputs/apk/release/app-release.apk"
           test -f "$APK"
-          unzip -l "$APK" | grep -E "lib/|classes.*\.dex|AndroidManifest\.xml" || true
-          cp "$APK" dist/release/mobile-labs-release.apk
+          unzip -l "$APK" | grep -E "lib/|classes.*\.dex|AndroidManifest\.xml"
+          unzip -l "$APK" | grep -q "lib/arm64-v8a/libobs.so"
+          unzip -l "$APK" | grep -q "lib/arm64-v8a/libmobilelabs_obs.so"
+          cp "$APK" dist/release/obsmobile-release.apk
           if [ "${{ inputs.package_xapk }}" != "false" ]; then
             chmod +x scripts/package_xapk.sh
-            bash scripts/package_xapk.sh "$APK" "${{ steps.ver.outputs.code }}" "${{ steps.ver.outputs.name }}" "dist/release/mobile-labs-release.xapk"
+            bash scripts/package_xapk.sh "$APK" "${{ steps.ver.outputs.code }}" "${{ steps.ver.outputs.name }}" "dist/release/obsmobile-release.xapk"
           fi
           sha256sum dist/release/* | tee dist/release/sha256.txt
 
-      - name: Upload Debug APK & XAPK Artifact
+      - name: Upload Unified Debug APK & XAPK Artifact
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_variant != 'release' }}
         uses: actions/upload-artifact@v4
         with:
-          name: mobile-labs-debug-apk-xapk
+          name: obsmobile-debug-apk-xapk
           path: dist/debug/*
           retention-days: 30
 
-      - name: Upload Release APK & XAPK Artifact
+      - name: Upload Unified Release APK & XAPK Artifact
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_variant != 'debug' }}
         uses: actions/upload-artifact@v4
         with:
-          name: mobile-labs-release-apk-xapk
+          name: obsmobile-release-apk-xapk
           path: dist/release/*
           retention-days: 30

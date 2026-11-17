@@ -81,7 +81,7 @@ import java.util.Locale
 import javax.net.ssl.SSLSocketFactory
 
 /**
- * Single owner of state for Mobile Labs (Iron Rule R10).
+ * Single owner of state for OBSmobile (Iron Rule R10).
  * Coordinates libobs JNI bridge, multi-layer GLES3 compositor, GPU video filters,
  * zero-allocation Audio DSP chain, Studio Mode + 5 transitions, touch canvas editing,
  * 1-click YouTube & Twitch OAuth/multi-stream/chat, Instant Replay Buffer, Pause/Resume recording,
@@ -131,6 +131,7 @@ class SessionController(private val context: Context) {
     private var reconnectCount = 0
     private var lastNetworkDropSeen = 0L
     private var dynamicTargetBitrateKbps = 0
+    @Volatile private var primaryRtmpPhase = SessionPhase.IDLE
     private var overlayLandscapePos = Pair(24, 180)
     private var overlayPortraitPos = Pair(24, 240)
     private var cameraSurfaceRef: Surface? = null
@@ -164,6 +165,13 @@ class SessionController(private val context: Context) {
     }
 
     fun initialize() {
+        _uiState.update {
+            it.copy(
+                isInitializing = true,
+                loadingProgress = 0.15f,
+                loadingStatusText = "Loading OBS Mobile scenes & settings..."
+            )
+        }
         val loadedScenes = repository.loadSceneCollection()
         val loadedSettings = repository.loadSettings()
         overlayLandscapePos = loadedSettings.overlayLandscapeX to loadedSettings.overlayLandscapeY
@@ -184,6 +192,9 @@ class SessionController(private val context: Context) {
             cur.copy(
                 engineBackend = obsBridge.backendStatus,
                 libObsVersion = obsBridge.getVersionString(),
+                isInitializing = true,
+                loadingProgress = 0.55f,
+                loadingStatusText = "Loading Keystore credentials & probing codecs...",
                 videoConfig = loadedSettings.videoConfig,
                 sceneCollection = loadedScenes,
                 savedCollectionNames = loadedSettings.savedCollections,
@@ -225,36 +236,53 @@ class SessionController(private val context: Context) {
         platformCoordinator.hydrateSavedConnections()
 
         scope.launch(Dispatchers.IO) {
-            val savedUrl = runCatching { secretStore.loadServerUrl() }.getOrDefault("")
-            val savedPreset = runCatching { secretStore.loadPresetName() }.getOrNull()?.let { name ->
-                runCatching { RtmpServicePreset.valueOf(name) }.getOrNull()
-            } ?: RtmpServicePreset.CUSTOM
-            val hasKey = runCatching { secretStore.hasStreamKey() }.getOrDefault(false)
-            val masked = runCatching { secretStore.getMaskedPreview() }.getOrDefault("Not set")
+            try {
+                val savedUrl = runCatching { secretStore.loadServerUrl() }.getOrDefault("")
+                val savedPreset = runCatching { secretStore.loadPresetName() }.getOrNull()?.let { name ->
+                    runCatching { RtmpServicePreset.valueOf(name) }.getOrNull()
+                } ?: RtmpServicePreset.CUSTOM
+                val hasKey = runCatching { secretStore.hasStreamKey() }.getOrDefault(false)
+                val masked = runCatching { secretStore.getMaskedPreview() }.getOrDefault("Not set")
 
-            val secUrl = runCatching { secretStore.loadSecondaryServerUrl() }.getOrDefault("")
-            val secPreset = runCatching { secretStore.loadSecondaryPresetName() }.getOrNull()?.let { name ->
-                runCatching { RtmpServicePreset.valueOf(name) }.getOrNull()
-            } ?: RtmpServicePreset.TWITCH
-            val secHasKey = runCatching { secretStore.hasSecondaryStreamKey() }.getOrDefault(false)
-            val secMasked = runCatching { secretStore.getSecondaryMaskedPreview() }.getOrDefault("Not set")
+                val secUrl = runCatching { secretStore.loadSecondaryServerUrl() }.getOrDefault("")
+                val secPreset = runCatching { secretStore.loadSecondaryPresetName() }.getOrNull()?.let { name ->
+                    runCatching { RtmpServicePreset.valueOf(name) }.getOrNull()
+                } ?: RtmpServicePreset.TWITCH
+                val secHasKey = runCatching { secretStore.hasSecondaryStreamKey() }.getOrDefault(false)
+                val secMasked = runCatching { secretStore.getSecondaryMaskedPreview() }.getOrDefault("Not set")
 
-            val report = runCatching { probeTool.runProbe(testConcurrency = false) }.getOrNull()
+                _uiState.update {
+                    it.copy(
+                        loadingProgress = 0.85f,
+                        loadingStatusText = "Verifying MediaCodec hardware encoders..."
+                    )
+                }
+                val report = runCatching { probeTool.runProbe(testConcurrency = false) }.getOrNull()
 
-            _uiState.update { cur ->
-                cur.copy(
-                    rtmpServicePreset = savedPreset,
-                    rtmpServerUrl = savedUrl.ifBlank { savedPreset.defaultUrl },
-                    hasStreamKeySaved = hasKey,
-                    maskedStreamKeyPreview = masked,
-                    dualDestination = cur.dualDestination.copy(
-                        preset = secPreset,
-                        serverUrl = secUrl.ifBlank { secPreset.defaultUrl },
-                        hasKeySaved = secHasKey,
-                        maskedKeyPreview = secMasked
-                    ),
-                    deviceReport = report
-                )
+                _uiState.update { cur ->
+                    cur.copy(
+                        rtmpServicePreset = savedPreset,
+                        rtmpServerUrl = savedUrl.ifBlank { savedPreset.defaultUrl },
+                        hasStreamKeySaved = hasKey,
+                        maskedStreamKeyPreview = masked,
+                        dualDestination = cur.dualDestination.copy(
+                            preset = secPreset,
+                            serverUrl = secUrl.ifBlank { secPreset.defaultUrl },
+                            hasKeySaved = secHasKey,
+                            maskedKeyPreview = secMasked
+                        ),
+                        deviceReport = report,
+                        isInitializing = false,
+                        loadingProgress = 1.0f,
+                        loadingStatusText = "Ready"
+                    )
+                }
+            } finally {
+                _uiState.update { cur ->
+                    if (cur.isInitializing) {
+                        cur.copy(isInitializing = false, loadingProgress = 1.0f, loadingStatusText = "Ready")
+                    } else cur
+                }
             }
         }
 
@@ -338,19 +366,27 @@ class SessionController(private val context: Context) {
             repository = repository,
             onEncoderSurfaceReady = { encSurface -> compositor.attachEncoderSurface(encSurface) },
             onStreamConnected = {
-                reconnectCount = 0
-                streamStartedAtMs = System.currentTimeMillis()
-                _uiState.update {
-                    it.copy(
-                        sessionPhase = SessionPhase.LIVE,
-                        reconnectCountdownSec = 0,
-                        errorReason = null,
-                        statusMessage = "LIVE · Streaming to ${KeystoreSecretStore.redactUrlAndKeys(it.rtmpServerUrl)}"
-                    )
-                }
+                primaryRtmpPhase = SessionPhase.LIVE
+                markSessionLiveFromAnyDestination(
+                    "LIVE · Streaming to ${KeystoreSecretStore.redactUrlAndKeys(_uiState.value.rtmpServerUrl)}"
+                )
                 logEvent("RTMP output started (LIVE)")
             },
-            onStreamError = { reason -> handleStreamDisconnect(reason) },
+            onStreamError = { reason ->
+                primaryRtmpPhase = SessionPhase.ERROR
+                val cur = _uiState.value
+                val anyOtherAlive = cur.dualDestination.phase == SessionPhase.LIVE ||
+                    cur.dualDestination.phase == SessionPhase.CONNECTING ||
+                    cur.youtubeConnection.outputPhase == SessionPhase.LIVE ||
+                    cur.youtubeConnection.outputPhase == SessionPhase.CONNECTING ||
+                    cur.twitchConnection.outputPhase == SessionPhase.LIVE ||
+                    cur.twitchConnection.outputPhase == SessionPhase.CONNECTING
+                if (!anyOtherAlive && cur.sessionPhase != SessionPhase.ARMED && cur.sessionPhase != SessionPhase.IDLE) {
+                    handleStreamDisconnect(reason)
+                } else {
+                    logEvent("Primary RTMP disconnected (other destinations active): ${KeystoreSecretStore.redactUrlAndKeys(reason)}")
+                }
+            },
             onRecordingFinalized = { published ->
                 recordStartedAtMs = 0L
                 recordTotalPausedMs = 0L
@@ -359,7 +395,7 @@ class SessionController(private val context: Context) {
                     cur.copy(
                         recordingPhase = RecordingPhase.IDLE,
                         recentRecordings = (listOf(published) + cur.recentRecordings).take(20),
-                        statusMessage = "Saved ${published.fileName} to Movies/Mobile Labs"
+                        statusMessage = "Saved ${published.fileName} to Movies/OBSmobile"
                     )
                 }
                 logEvent("Recording finalized: ${published.fileName} (${published.bytesSize / 1024} KB)")
@@ -513,6 +549,7 @@ class SessionController(private val context: Context) {
                 )
             }
 
+            primaryRtmpPhase = if (hasPrimaryRtmp) SessionPhase.CONNECTING else SessionPhase.IDLE
             if (hasPrimaryRtmp) {
                 pipeline?.startStreaming(url, key, st.videoConfig)
             }
@@ -533,20 +570,22 @@ class SessionController(private val context: Context) {
                     onError = { err ->
                         onSlotError(err)
                         val cur = _uiState.value
-                        val anyOtherAlive = (cur.hasStreamKeySaved && cur.rtmpServerUrl.isNotBlank()) ||
+                        val anyOtherAlive = primaryRtmpPhase == SessionPhase.LIVE ||
+                            primaryRtmpPhase == SessionPhase.CONNECTING ||
                             cur.dualDestination.phase == SessionPhase.LIVE ||
+                            cur.dualDestination.phase == SessionPhase.CONNECTING ||
                             cur.youtubeConnection.outputPhase == SessionPhase.LIVE ||
                             cur.youtubeConnection.outputPhase == SessionPhase.CONNECTING ||
                             cur.twitchConnection.outputPhase == SessionPhase.LIVE ||
                             cur.twitchConnection.outputPhase == SessionPhase.CONNECTING
-                        if (!anyOtherAlive && cur.sessionPhase != SessionPhase.ARMED) {
+                        if (!anyOtherAlive && cur.sessionPhase != SessionPhase.ARMED && cur.sessionPhase != SessionPhase.IDLE) {
                             handleStreamDisconnect(err)
                         }
                     }
                 )
             }
 
-            // Dual Custom Destination (shares single HW H.264/AAC encode; failures isolated)
+            // Dual Custom Destination (shares single HW H.264/AAC encode; failures isolated when primary/others are active)
             if (st.dualDestination.enabled) {
                 if (hasDualRtmp) {
                     _uiState.update { cur ->
@@ -574,15 +613,27 @@ class SessionController(private val context: Context) {
                             logEvent("Secondary RTMP destination LIVE")
                         },
                         onError = { err ->
+                            val redactedErr = KeystoreSecretStore.redactUrlAndKeys(err, secKey)
                             _uiState.update { cur ->
                                 cur.copy(
                                     dualDestination = cur.dualDestination.copy(
                                         phase = SessionPhase.ERROR,
-                                        errorReason = KeystoreSecretStore.redactUrlAndKeys(err, secKey)
+                                        errorReason = redactedErr
                                     )
                                 )
                             }
-                            logEvent("Secondary RTMP warning (primary unaffected): ${KeystoreSecretStore.redactUrlAndKeys(err, secKey)}")
+                            val cur = _uiState.value
+                            val anyOtherAlive = primaryRtmpPhase == SessionPhase.LIVE ||
+                                primaryRtmpPhase == SessionPhase.CONNECTING ||
+                                cur.youtubeConnection.outputPhase == SessionPhase.LIVE ||
+                                cur.youtubeConnection.outputPhase == SessionPhase.CONNECTING ||
+                                cur.twitchConnection.outputPhase == SessionPhase.LIVE ||
+                                cur.twitchConnection.outputPhase == SessionPhase.CONNECTING
+                            if (!anyOtherAlive && cur.sessionPhase != SessionPhase.ARMED && cur.sessionPhase != SessionPhase.IDLE) {
+                                handleStreamDisconnect(redactedErr)
+                            } else {
+                                logEvent("Secondary RTMP warning (other destinations unaffected): $redactedErr")
+                            }
                         }
                     )
                 } else {
@@ -606,10 +657,10 @@ class SessionController(private val context: Context) {
         }
         _uiState.update { cur ->
             val liveTags = buildList {
+                if (primaryRtmpPhase == SessionPhase.LIVE) add("RTMP")
                 if (cur.youtubeConnection.outputPhase == SessionPhase.LIVE) add("YouTube")
                 if (cur.twitchConnection.outputPhase == SessionPhase.LIVE) add("Twitch")
                 if (cur.dualDestination.phase == SessionPhase.LIVE) add("Dual")
-                if (cur.hasStreamKeySaved && cur.rtmpServerUrl.isNotBlank() && isEmpty()) add("RTMP")
             }
             cur.copy(
                 sessionPhase = SessionPhase.LIVE,
@@ -623,6 +674,7 @@ class SessionController(private val context: Context) {
     fun stopStreaming() {
         reconnectJob?.cancel()
         reconnectJob = null
+        primaryRtmpPhase = SessionPhase.IDLE
         streamStartedAtMs = 0L
         pipeline?.stopAllStreams()
         platformCoordinator.onStreamingStopped()
@@ -786,7 +838,7 @@ class SessionController(private val context: Context) {
                         _uiState.update {
                             it.copy(
                                 lastScreenshotPath = uri,
-                                statusMessage = "Canvas PNG saved to Pictures/Mobile Labs"
+                                statusMessage = "Canvas PNG saved to Pictures/OBSmobile"
                             )
                         }
                         logEvent("Canvas screenshot saved: $uri")
@@ -801,6 +853,7 @@ class SessionController(private val context: Context) {
     fun disarmSession() {
         reconnectJob?.cancel()
         reconnectJob = null
+        primaryRtmpPhase = SessionPhase.IDLE
         streamStartedAtMs = 0L
         recordStartedAtMs = 0L
         recordTotalPausedMs = 0L
@@ -976,7 +1029,7 @@ class SessionController(private val context: Context) {
         _uiState.update {
             it.copy(
                 customRecordingFolderUri = uri,
-                statusMessage = if (uri != null) "Custom recording folder set (SAF)" else "Recording folder reset to Movies/Mobile Labs"
+                statusMessage = if (uri != null) "Custom recording folder set (SAF)" else "Recording folder reset to Movies/OBSmobile"
             )
         }
         persistCurrentSettings()
@@ -1249,7 +1302,7 @@ class SessionController(private val context: Context) {
         } else 0f
         val rec = BenchmarkRecord(
             id = "bench_${System.currentTimeMillis()}",
-            appName = appName.ifBlank { "Mobile Labs" },
+            appName = appName.ifBlank { "OBSmobile" },
             presetLabel = "${st.videoConfig.outputWidth}x${st.videoConfig.outputHeight}@${st.videoConfig.fps}",
             gameName = gameName.ifBlank { "Geometry Dash" },
             gameAvgFps = avgFps,
@@ -2019,7 +2072,7 @@ class SessionController(private val context: Context) {
             AlertEventType.MILESTONE -> "100 Followers Reached!"
         }
         val samplePlat = if (type == AlertEventType.DONATION) StreamingPlatform.YOUTUBE else StreamingPlatform.TWITCH
-        triggerStreamAlert(type, samplePlat, sampleName, "Test Broadcast Alert · Mobile Labs")
+        triggerStreamAlert(type, samplePlat, sampleName, "Test Broadcast Alert · OBSmobile")
     }
 
     fun adjustGoalProgress(sourceId: String, delta: Int) {

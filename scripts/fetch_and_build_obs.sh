@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Hermetic clean-checkout NDK build script for Jansson + SIMDe + minimal static FFmpeg + libobs (arm64-v8a).
-# Pins upstream obs-studio 32.2.1 (commit 57bfcf10a).
+# Hermetic clean-checkout NDK build script for Jansson + SIMDe + Uthash + minimal static FFmpeg + libobs (arm64-v8a).
+# Pins upstream obs-studio 32.2.1 (commit 57bfcf10a) and compiles ONLY core libobs.so via obs_android_libobs/.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CPP_DIR="$ROOT_DIR/app/src/main/cpp"
+ANDROID_LIBOBS_CMAKE_DIR="$CPP_DIR/obs_android_libobs"
 THIRD_PARTY_DIR="$CPP_DIR/third_party"
 DEPS_SRC_DIR="$THIRD_PARTY_DIR/deps-src"
 DEPS_PREFIX="$THIRD_PARTY_DIR/deps-install-arm64-v8a"
+OBS_SRC_DIR="${OBS_ANDROID_FORK_DIR:-$THIRD_PARTY_DIR/obs-studio}"
 PREBUILT_DIR="$CPP_DIR/prebuilt/arm64-v8a"
 JNILIBS_DIR="$ROOT_DIR/app/src/main/jniLibs/arm64-v8a"
 
 OBS_COMMIT="57bfcf10a"
+OBS_VERSION_STR="32.2.1"
 JANSSON_TAG="v2.14"
 SIMDE_TAG="v0.8.2"
 UTHASH_TAG="v2.3.0"
@@ -26,28 +29,7 @@ fi
 export CMAKE_POLICY_VERSION_MINIMUM=3.5
 
 if [ -z "${ANDROID_NDK_HOME:-}" ]; then
-  echo "ERROR: ANDROID_NDK_HOME is not set. Point it to NDK 27+." >&2
-  exit 1
-fi
-
-if [ -z "${OBS_ANDROID_FORK_DIR:-}" ]; then
-  cat >&2 <<'EOF'
-ERROR: Upstream obs-studio (32.2.1 / commit 57bfcf10a) does NOT support Android NDK cross-compilation.
-Forcing OS_LINUX=ON triggers Linux desktop dependencies unavailable in Android Bionic/NDK:
-  - CMake: KDE Extra CMake Modules (ECM via cmake/linux/ecmconfig.cmake)
-  - Libraries: libuuid, X11/XCB/GLX, Wayland/EGL, D-Bus/Gio, PulseAudio/PipeWire, mbedTLS, x264
-  - Platform code: platform-nix.c (pthread_cancel, execinfo.h), obs-nix-*.c, gl-nix.c (no ANativeWindow winsys)
-
-Mobile Labs production streaming/recording runs on the pure Android-native pipeline
-(MediaProjection + GlZeroCopyCompositor GLES3 + AudioCaptureMixer + MediaCodec + RtmpFlvSender).
-If you maintain a custom Android-ported libobs fork, set OBS_ANDROID_FORK_DIR=/path/to/obs-android-fork.
-EOF
-  exit 2
-fi
-
-OBS_SRC_DIR="$OBS_ANDROID_FORK_DIR"
-if [ ! -f "$OBS_SRC_DIR/libobs/obs.h" ]; then
-  echo "ERROR: OBS_ANDROID_FORK_DIR ($OBS_SRC_DIR) does not contain libobs/obs.h" >&2
+  echo "ERROR: ANDROID_NDK_HOME is not set. Point it to Android NDK 27+." >&2
   exit 1
 fi
 
@@ -65,7 +47,22 @@ CXX_BIN="$TOOLCHAIN_BIN/aarch64-linux-android${ANDROID_PLATFORM}-clang++"
 
 mkdir -p "$THIRD_PARTY_DIR" "$DEPS_SRC_DIR" "$DEPS_PREFIX/include" "$DEPS_PREFIX/lib" "$PREBUILT_DIR/include" "$JNILIBS_DIR"
 
-# 1. Cross-compile Jansson (static, PIC)
+# 1. Fetch pinned upstream obs-studio (32.2.1 / 57bfcf10a) if not provided or already checked out
+if [ -z "${OBS_ANDROID_FORK_DIR:-}" ]; then
+  if [ ! -f "$OBS_SRC_DIR/libobs/obs.h" ]; then
+    echo "Fetching upstream obs-studio ($OBS_COMMIT / $OBS_VERSION_STR)..."
+    rm -rf "$OBS_SRC_DIR"
+    git clone https://github.com/obsproject/obs-studio.git "$OBS_SRC_DIR"
+    git -C "$OBS_SRC_DIR" checkout "$OBS_COMMIT"
+  fi
+fi
+
+if [ ! -f "$OBS_SRC_DIR/libobs/obs.h" ]; then
+  echo "ERROR: OBS_SRC_DIR ($OBS_SRC_DIR) does not contain libobs/obs.h" >&2
+  exit 1
+fi
+
+# 2. Cross-compile Jansson (static, PIC)
 if [ ! -f "$DEPS_PREFIX/lib/libjansson.a" ]; then
   echo "Building Jansson $JANSSON_TAG for $ANDROID_ABI..."
   if [ ! -d "$DEPS_SRC_DIR/jansson/.git" ]; then
@@ -85,7 +82,7 @@ if [ ! -f "$DEPS_PREFIX/lib/libjansson.a" ]; then
   cmake --build "$DEPS_SRC_DIR/build-jansson" --target install --parallel "$(nproc)"
 fi
 
-# 2. Stage header-only SIMDe & Uthash
+# 3. Stage header-only SIMDe & Uthash
 if [ ! -d "$DEPS_PREFIX/include/simde" ]; then
   echo "Staging SIMDe $SIMDE_TAG headers..."
   if [ ! -d "$DEPS_SRC_DIR/simde/.git" ]; then
@@ -102,7 +99,7 @@ if [ ! -f "$DEPS_PREFIX/include/uthash.h" ]; then
   cp "$DEPS_SRC_DIR/uthash/src/"*.h "$DEPS_PREFIX/include/"
 fi
 
-# 3. Cross-compile minimal static FFmpeg (avutil/avcodec/avformat/swscale/swresample)
+# 4. Cross-compile minimal static FFmpeg (avutil/avcodec/avformat/swscale/swresample)
 if [ ! -f "$DEPS_PREFIX/lib/libavcodec.a" ]; then
   echo "Building minimal static FFmpeg $FFMPEG_TAG for $ANDROID_ABI..."
   if [ ! -d "$DEPS_SRC_DIR/ffmpeg/.git" ]; then
@@ -131,6 +128,7 @@ if [ ! -f "$DEPS_PREFIX/lib/libavcodec.a" ]; then
     --disable-avdevice \
     --disable-avfilter \
     --disable-postproc \
+    --disable-vulkan \
     --disable-asm \
     --enable-avutil \
     --enable-avcodec \
@@ -142,42 +140,105 @@ if [ ! -f "$DEPS_PREFIX/lib/libavcodec.a" ]; then
   popd >/dev/null
 fi
 
-echo "Building Android-ported libobs ($ANDROID_ABI) via Android NDK toolchain (target: libobs only)..."
+# 5. Generate Android obsconfig.h without invoking desktop Linux KDE ECM CMake scripts
 OBS_BUILD_DIR="$THIRD_PARTY_DIR/build-obs-$ANDROID_ABI"
-export PKG_CONFIG_LIBDIR="$DEPS_PREFIX/lib/pkgconfig"
+GENERATED_CFG_DIR="$OBS_BUILD_DIR/generated_config"
+mkdir -p "$OBS_BUILD_DIR" "$GENERATED_CFG_DIR"
 
-cmake -S "$OBS_SRC_DIR" -B "$OBS_BUILD_DIR" \
+python3 - "$OBS_SRC_DIR" "$GENERATED_CFG_DIR/obsconfig.h" "$OBS_VERSION_STR" <<'PYEOF'
+import os
+import re
+import sys
+
+obs_src, out_path, ver = sys.argv[1:4]
+candidates = [
+    os.path.join(obs_src, "libobs", "obsconfig.h.in"),
+    os.path.join(obs_src, "libobs", "cmake", "obsconfig.h.in"),
+]
+template = next((p for p in candidates if os.path.isfile(p)), None)
+
+repls = {
+    "OBS_VERSION": ver,
+    "OBS_VERSION_CANONICAL": ver,
+    "OBS_VERSION_MAJOR": ver.split(".")[0],
+    "OBS_VERSION_MINOR": ver.split(".")[1],
+    "OBS_VERSION_PATCH": ver.split(".")[2],
+    "OBS_DATA_PATH": "/data/local/tmp/obsmobile-obs-data",
+    "OBS_INSTALL_PREFIX": "",
+    "OBS_PLUGIN_DESTINATION": "",
+    "OBS_RELATIVE_PREFIX": "",
+    "OBS_UNIX_STRUCTURE": "0",
+    "OBS_RELEASE_CANDIDATE": "0",
+    "OBS_BETA": "0",
+}
+
+if template:
+    with open(template, "r", encoding="utf-8") as f:
+        text = f.read()
+    for k, v in repls.items():
+        text = text.replace(f"@{k}@", v).replace(f"${{{k}}}", v)
+    text = re.sub(r"@[^@\n]+@|\$\{[^}\n]+\}", "", text)
+
+    lines = []
+    for line in text.splitlines():
+        m01 = re.match(r"^\s*#cmakedefine01\s+(\S+)", line)
+        if m01:
+            macro = m01.group(1)
+            val = "1" if macro == "HAVE_OBSCONFIG_H" else "0"
+            lines.append(f"#define {macro} {val}")
+            continue
+        m = re.match(r"^\s*#cmakedefine\s+(\S+)(.*)$", line)
+        if m:
+            macro = m.group(1)
+            if macro in ("HAVE_OBSCONFIG_H",):
+                lines.append(f"#define {macro} 1")
+            else:
+                lines.append(f"/* #undef {macro} */")
+            continue
+        lines.append(line)
+    out_text = "\n".join(lines) + "\n"
+else:
+    out_text = f"""#pragma once
+#define HAVE_OBSCONFIG_H 1
+#define OBS_VERSION "{ver}"
+#define OBS_VERSION_CANONICAL "{ver}"
+#define OBS_DATA_PATH "/data/local/tmp/obsmobile-obs-data"
+#define OBS_INSTALL_PREFIX ""
+#define OBS_PLUGIN_DESTINATION ""
+#define OBS_RELATIVE_PREFIX ""
+#define OBS_RELEASE_CANDIDATE 0
+#define OBS_BETA 0
+"""
+
+with open(out_path, "w", encoding="utf-8") as f:
+    f.write(out_text)
+print(f"Generated Android obsconfig.h at {out_path} (from template={template})")
+PYEOF
+
+echo "Building core libobs.so ($ANDROID_ABI) via Android NDK toolchain (target: libobs only)..."
+cmake -S "$ANDROID_LIBOBS_CMAKE_DIR" -B "$OBS_BUILD_DIR" \
   -G Ninja \
-  -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
   -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
   -DANDROID_ABI="$ANDROID_ABI" \
   -DANDROID_PLATFORM="android-$ANDROID_PLATFORM" \
   -DANDROID_STL=c++_shared \
   -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_PREFIX_PATH="$DEPS_PREFIX" \
-  -DCMAKE_FIND_ROOT_PATH="$DEPS_PREFIX;$SYSROOT" \
-  -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH \
-  -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH \
-  -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \
-  -DUthash_INCLUDE_DIR="$DEPS_PREFIX/include" \
-  -DFFmpeg_INCLUDE_DIRS="$DEPS_PREFIX/include" \
-  -DCMAKE_C_FLAGS="-I$DEPS_PREFIX/include -fPIC" \
-  -DCMAKE_CXX_FLAGS="-I$DEPS_PREFIX/include -fPIC" \
-  -DBUILD_SHARED_LIBS=ON \
-  -DENABLE_UI=OFF \
-  -DENABLE_SCRIPTING=OFF \
-  -DENABLE_PLUGINS=OFF \
-  -DENABLE_BROWSER=OFF \
-  -DENABLE_RTMPS=OFF \
-  -DBUILD_TESTS=OFF
+  -DOBS_SRC_DIR="$OBS_SRC_DIR" \
+  -DOBS_DEPS_PREFIX="$DEPS_PREFIX"
 
 cmake --build "$OBS_BUILD_DIR" --target libobs --parallel "$(nproc)"
 
-rm -f "$PREBUILT_DIR/"*.so "$JNILIBS_DIR/"*.so
-cp "$OBS_BUILD_DIR/libobs/libobs.so" "$PREBUILT_DIR/libobs.so"
-cp "$OBS_BUILD_DIR/libobs/libobs.so" "$JNILIBS_DIR/libobs.so"
-cp -R "$OBS_BUILD_DIR/config/"* "$PREBUILT_DIR/include/" 2>/dev/null || true
+LIBOBS_SO="$(find "$OBS_BUILD_DIR" -maxdepth 3 -name 'libobs.so' | head -n1)"
+if [ -z "$LIBOBS_SO" ] || [ ! -f "$LIBOBS_SO" ]; then
+  echo "ERROR: libobs.so was not produced under $OBS_BUILD_DIR" >&2
+  exit 1
+fi
 
-sha256sum "$PREBUILT_DIR/libobs.so" > "$PREBUILT_DIR/libobs.so.sha256"
-echo "Staged libobs.so cleanly into app/src/main/jniLibs/arm64-v8a:"
+rm -f "$PREBUILT_DIR/"*.so "$JNILIBS_DIR/"*.so
+cp "$LIBOBS_SO" "$PREBUILT_DIR/libobs.so"
+cp "$LIBOBS_SO" "$JNILIBS_DIR/libobs.so"
+cp "$GENERATED_CFG_DIR/obsconfig.h" "$PREBUILT_DIR/include/obsconfig.h"
+
+sha256sum "$JNILIBS_DIR/libobs.so" > "$PREBUILT_DIR/libobs.so.sha256"
+echo "Staged libobs.so cleanly into app/src/main/jniLibs/arm64-v8a/libobs.so:"
 cat "$PREBUILT_DIR/libobs.so.sha256"

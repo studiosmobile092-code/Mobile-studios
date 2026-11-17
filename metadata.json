@@ -1,6 +1,6 @@
 {
-  "name": "Mobile Labs",
-  "description": "OBS-powered live streaming and local recording studio for Android tablets, built on libobs with a hardware-encoded zero-copy video pipeline.",
+  "name": "OBSmobile",
+  "description": "OBS-powered live streaming and local recording studio for Android tablets, built with libobs and a hardware-encoded zero-copy video pipeline.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

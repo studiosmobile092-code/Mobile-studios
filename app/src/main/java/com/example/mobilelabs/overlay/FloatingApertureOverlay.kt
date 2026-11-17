@@ -112,7 +112,7 @@ class FloatingApertureOverlay(
 
         val badge = ApertureBadgeView(context).apply {
             layoutParams = LinearLayout.LayoutParams(badgeSizePx, badgeSizePx)
-            contentDescription = "Mobile Labs floating control"
+            contentDescription = "OBSmobile floating control"
         }
 
         val menu = LinearLayout(context).apply {

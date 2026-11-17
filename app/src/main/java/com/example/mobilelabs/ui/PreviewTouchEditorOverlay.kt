@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -28,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -266,66 +269,82 @@ fun PreviewTouchEditorOverlay(
                 }
 
                 if (isPrimary && !src.locked && !isTouchBlockedLive) {
+                    val latestT by rememberUpdatedState(t)
+                    val dragKey = Triple(src.id, activeTool, canvasWpx to canvasHpx)
                     if (activeTool == PreviewTool.CROP) {
-                        // Top/Bottom/Left/Right crop sliders
+                        // Top/Bottom/Left/Right crop sliders with live transform tracking
                         HandleKnob(
                             color = Color(0xFF43B581),
+                            dragKey = dragKey,
                             modifier = Modifier.align(Alignment.CenterStart),
                             onDrag = { dx, _ ->
-                                onUpdateCrop(src.id, t.cropLeft + dx / canvasWpx, t.cropTop, t.cropRight, t.cropBottom)
+                                val cur = latestT
+                                onUpdateCrop(src.id, cur.cropLeft + dx / canvasWpx, cur.cropTop, cur.cropRight, cur.cropBottom)
                             }
                         )
                         HandleKnob(
                             color = Color(0xFF43B581),
+                            dragKey = dragKey,
                             modifier = Modifier.align(Alignment.CenterEnd),
                             onDrag = { dx, _ ->
-                                onUpdateCrop(src.id, t.cropLeft, t.cropTop, t.cropRight - dx / canvasWpx, t.cropBottom)
+                                val cur = latestT
+                                onUpdateCrop(src.id, cur.cropLeft, cur.cropTop, cur.cropRight - dx / canvasWpx, cur.cropBottom)
                             }
                         )
                         HandleKnob(
                             color = Color(0xFF43B581),
+                            dragKey = dragKey,
                             modifier = Modifier.align(Alignment.TopCenter),
                             onDrag = { _, dy ->
-                                onUpdateCrop(src.id, t.cropLeft, t.cropTop + dy / canvasHpx, t.cropRight, t.cropBottom)
+                                val cur = latestT
+                                onUpdateCrop(src.id, cur.cropLeft, cur.cropTop + dy / canvasHpx, cur.cropRight, cur.cropBottom)
                             }
                         )
                         HandleKnob(
                             color = Color(0xFF43B581),
+                            dragKey = dragKey,
                             modifier = Modifier.align(Alignment.BottomCenter),
                             onDrag = { _, dy ->
-                                onUpdateCrop(src.id, t.cropLeft, t.cropTop, t.cropRight, t.cropBottom - dy / canvasHpx)
+                                val cur = latestT
+                                onUpdateCrop(src.id, cur.cropLeft, cur.cropTop, cur.cropRight, cur.cropBottom - dy / canvasHpx)
                             }
                         )
                     } else {
                         // Bottom-Right resize handle
                         HandleKnob(
                             color = ApertureRedHi,
+                            dragKey = dragKey,
                             modifier = Modifier.align(Alignment.BottomEnd),
                             onDrag = { dx, dy ->
                                 onDragSourceTransform(src.id, 0f, 0f, dx / canvasWpx, dy / canvasHpx, 0f, false)
                             }
                         )
-                        // Top-Center rotation handle
-                        Surface(
-                            color = SurfaceLevel2,
-                            shape = CircleShape,
-                            border = BorderStroke(1.dp, ApertureRedHi),
+                        // Top-Center rotation handle (48dp touch hitbox around 22dp visual badge)
+                        Box(
+                            contentAlignment = Alignment.Center,
                             modifier = Modifier
                                 .align(Alignment.TopCenter)
-                                .size(22.dp)
-                                .pointerInput(src.id) {
+                                .size(48.dp)
+                                .pointerInput(src.id, canvasWpx, canvasHpx) {
                                     detectDragGestures { change, drag ->
                                         change.consume()
                                         onDragSourceTransform(src.id, 0f, 0f, 0f, 0f, drag.x * 0.4f, false)
                                     }
                                 }
                         ) {
-                            Icon(
-                                Icons.AutoMirrored.Filled.RotateRight,
-                                contentDescription = "Rotate source",
-                                tint = StudioText,
-                                modifier = Modifier.padding(3.dp)
-                            )
+                            Surface(
+                                color = SurfaceLevel2,
+                                shape = CircleShape,
+                                border = BorderStroke(1.dp, ApertureRedHi),
+                                modifier = Modifier.size(22.dp)
+                            ) {
+                                Icon(
+                                    Icons.AutoMirrored.Filled.RotateRight,
+                                    contentDescription = "Rotate source",
+                                    tint = StudioText,
+                                    modifier = Modifier.padding(3.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -361,21 +380,29 @@ fun PreviewTouchEditorOverlay(
 @Composable
 private fun HandleKnob(
     color: Color,
+    dragKey: Any,
     modifier: Modifier = Modifier,
     onDrag: (dxPx: Float, dyPx: Float) -> Unit
 ) {
+    val latestOnDrag by rememberUpdatedState(onDrag)
     Box(
+        contentAlignment = Alignment.Center,
         modifier = modifier
-            .size(20.dp)
-            .background(color, CircleShape)
-            .border(1.5.dp, Color.White, CircleShape)
-            .pointerInput(Unit) {
+            .size(48.dp)
+            .pointerInput(dragKey) {
                 detectDragGestures { change, drag ->
                     change.consume()
-                    onDrag(drag.x, drag.y)
+                    latestOnDrag(drag.x, drag.y)
                 }
             }
-    )
+    ) {
+        Box(
+            modifier = Modifier
+                .size(20.dp)
+                .background(color, CircleShape)
+                .border(1.5.dp, Color.White, CircleShape)
+        )
+    }
 }
 
 @Composable
@@ -391,6 +418,7 @@ fun SelectedSourceNudgeBar(
         modifier = modifier
             .background(Color(0xD916161A), RoundedCornerShape(6.dp))
             .border(1.dp, StudioDivider, RoundedCornerShape(6.dp))
+            .horizontalScroll(rememberScrollState())
             .padding(horizontal = 4.dp, vertical = 2.dp),
         horizontalArrangement = Arrangement.spacedBy(2.dp),
         verticalAlignment = Alignment.CenterVertically

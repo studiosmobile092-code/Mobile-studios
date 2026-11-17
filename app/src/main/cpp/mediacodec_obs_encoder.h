@@ -9,7 +9,7 @@ extern "C" {
 #endif
 
 /**
- * Registers the Mobile Labs hardware MediaCodec H.264 encoder module
+ * Registers the OBSmobile hardware MediaCodec H.264 encoder module
  * ("mobilelabs_mediacodec_h264") with libobs.
  * Supports zero-copy texture handoff via EGL shared context -> AMediaCodec Surface.
  */

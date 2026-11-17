@@ -78,7 +78,7 @@ class DiagnosticsExporter(private val context: Context) {
         secondaryStreamKeyToScrub: String? = null
     ): String? {
         val stamp = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
-        val zipName = "MobileLabs_Diag_$stamp.zip"
+        val zipName = "OBSmobile_Diag_$stamp.zip"
         val extraKeys = listOfNotNull(secondaryStreamKeyToScrub)
         val zipBytes = buildZipBytes(state, streamKeyToScrub, extraKeys)
 

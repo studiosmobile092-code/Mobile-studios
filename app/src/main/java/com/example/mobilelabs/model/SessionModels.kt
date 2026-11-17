@@ -293,7 +293,7 @@ data class SourceModel(
     val mediaLoop: Boolean = true,
     val mediaMuted: Boolean = false,
     val mediaPlaying: Boolean = true,
-    val textContent: String = "Mobile Labs Stream",
+    val textContent: String = "OBSmobile Stream",
     val textColorArgb: Long = 0xFFFFFFFFL,
     val textBgColorArgb: Long = 0x9916161AL,
     val textSizeSp: Float = 44f,
@@ -477,6 +477,9 @@ data class MobileLabsUiState(
     val appVersionLabel: String = "1.0.0-rc1",
     val sessionPhase: SessionPhase = SessionPhase.IDLE,
     val recordingPhase: RecordingPhase = RecordingPhase.IDLE,
+    val isInitializing: Boolean = false,
+    val loadingProgress: Float = 1.0f,
+    val loadingStatusText: String = "Ready",
     val statusMessage: String = "Ready — Tap Arm Capture to authorize MediaProjection",
     val errorReason: String? = null,
     val reconnectCountdownSec: Int = 0,
@@ -613,7 +616,7 @@ fun defaultSceneCollection(): SceneCollection {
                 name = "Intermission Title",
                 type = SourceType.TEXT_SOURCE,
                 visible = true,
-                textContent = "BE RIGHT BACK · MOBILE LABS",
+                textContent = "BE RIGHT BACK · OBS MOBILE",
                 textSizeSp = 48f,
                 transform = SourceTransform(0.18f, 0.40f, 0.64f, 0.18f)
             )
