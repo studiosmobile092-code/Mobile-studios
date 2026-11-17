@@ -271,11 +271,16 @@ class HardwareMediaPipeline(
             ptsRebaser.reset()
         }
         repository.clearActiveRecordingMarker()
-        if (file != null && file.exists() && file.length() > 1024L && repository.verifyMediaPlayable(file)) {
-            finalizeAndPublishFile(file, durationSec)
+        val playable = file != null && file.exists() && file.length() > 1024L && repository.verifyMediaPlayable(file)
+        val hasBytes = file != null && file.exists() && file.length() > 8192L
+        if (playable || hasBytes) {
+            finalizeAndPublishFile(file!!, durationSec)
+            if (!playable) {
+                onRecordingError("Recording saved, but the player check failed. Open it from Movies/OBSmobile.")
+            }
         } else {
             runCatching { file?.delete() }
-            onRecordingError("Recording too short — no playable frames captured")
+            onRecordingError("Recording too short — encoder never produced a keyframe. Arm capture, wait 2 seconds, then record again.")
         }
     }
 
@@ -297,12 +302,12 @@ class HardwareMediaPipeline(
     fun publishBitmapScreenshot(bitmap: Bitmap): String? {
         return runCatching {
             val stamp = MediaFileAllocator.currentTimestamp()
-            val fileName = "MobileLabs_Shot_$stamp.png"
+            val fileName = "OBSmobile_Shot_$stamp.png"
             val resolver = context.contentResolver
             val values = ContentValues().apply {
                 put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
                 put(MediaStore.Images.Media.MIME_TYPE, "image/png")
-                put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/Mobile Labs")
+                put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/OBSmobile")
                 put(MediaStore.Images.Media.IS_PENDING, 1)
             }
             val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
@@ -498,7 +503,7 @@ class HardwareMediaPipeline(
     fun getRecordingBytesWritten(): Long = recordBytesWritten.get()
 
     private fun allocateRecordingFile(): File =
-        MediaFileAllocator.allocateTimestampedFile(repository.recordingsDir, "MobileLabs", "mp4")
+        MediaFileAllocator.allocateTimestampedFile(repository.recordingsDir, "OBSmobile", "mp4")
 
     private fun finalizeAndPublishFile(file: File, durationSec: Long) {
         val sizeBytes = file.length()
@@ -527,7 +532,7 @@ class HardwareMediaPipeline(
                 )
                 setInteger(MediaFormat.KEY_BIT_RATE, cfg.videoBitrateKbps * 1000)
                 setInteger(MediaFormat.KEY_FRAME_RATE, cfg.fps)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, cfg.keyframeIntervalSec)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, cfg.keyframeIntervalSec.coerceAtLeast(1))
                 setInteger(
                     MediaFormat.KEY_BITRATE_MODE,
                     MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
@@ -802,16 +807,16 @@ class HardwareMediaPipeline(
         }
     }
 
-    private fun maybeStartMuxerLocked() {
+    private fun maybeStartMuxerLocked(forceVideoOnly: Boolean = false) {
         val m = muxer ?: return
         if (muxerStarted) return
         val vFmt = currentVideoFormat ?: return
         val aFmt = currentAudioFormat
-        if (aFmt == null && audioEncoder != null) return
-        val micFmt = if (multiTrackActive && micAudioEncoder != null) currentMicAudioFormat else null
-        if (multiTrackActive && micAudioEncoder != null && micFmt == null) return
-        val gameFmt = if (multiTrackActive && gameAudioEncoder != null) currentGameAudioFormat else null
-        if (multiTrackActive && gameAudioEncoder != null && gameFmt == null) return
+        if (!forceVideoOnly && aFmt == null && audioEncoder != null) return
+        val micFmt = if (!forceVideoOnly && multiTrackActive && micAudioEncoder != null) currentMicAudioFormat else null
+        if (!forceVideoOnly && multiTrackActive && micAudioEncoder != null && micFmt == null) return
+        val gameFmt = if (!forceVideoOnly && multiTrackActive && gameAudioEncoder != null) currentGameAudioFormat else null
+        if (!forceVideoOnly && multiTrackActive && gameAudioEncoder != null && gameFmt == null) return
 
         muxerVideoTrack = m.addTrack(vFmt)
         if (aFmt != null) {
@@ -839,6 +844,9 @@ class HardwareMediaPipeline(
             val m = muxer ?: return
             if (!muxerStarted) {
                 maybeStartMuxerLocked()
+                if (!muxerStarted && isVideo) {
+                    maybeStartMuxerLocked(forceVideoOnly = true)
+                }
                 if (!muxerStarted) return
             }
             val track = when {
@@ -849,7 +857,8 @@ class HardwareMediaPipeline(
             }
             if (track < 0) return
 
-            var rebasedPts = ptsRebaser.filterAndRebase(isVideo, isKey, info.presentationTimeUs)
+            val effectiveKey = isKey || (isVideo && annexBContainsIdrOrSps(rawBytes))
+            var rebasedPts = ptsRebaser.filterAndRebase(isVideo, effectiveKey, info.presentationTimeUs)
             if (rebasedPts < 0L) return
 
             when {
@@ -892,6 +901,29 @@ class HardwareMediaPipeline(
             }.isSuccess
             if (!writeOk) return
         }
+    }
+
+
+    /** Some encoders omit BUFFER_FLAG_KEY_FRAME on the first IDR. Scan Annex-B for SPS (7) or IDR (5). */
+    private fun annexBContainsIdrOrSps(data: ByteArray): Boolean {
+        var i = 0
+        while (i + 4 < data.size) {
+            val sc4 = data[i].toInt() == 0 && data[i + 1].toInt() == 0 && data[i + 2].toInt() == 0 && data[i + 3].toInt() == 1
+            val sc3 = data[i].toInt() == 0 && data[i + 1].toInt() == 0 && data[i + 2].toInt() == 1
+            val start = when {
+                sc4 -> 4
+                sc3 -> 3
+                else -> 0
+            }
+            if (start > 0 && i + start < data.size) {
+                val nal = data[i + start].toInt() and 0x1F
+                if (nal == 5 || nal == 7) return true
+                i += start + 1
+            } else {
+                i++
+            }
+        }
+        return false
     }
 
     private fun extractAvcConfig(fmt: MediaFormat) {
@@ -950,7 +982,7 @@ class HardwareMediaPipeline(
             val values = ContentValues().apply {
                 put(MediaStore.Video.Media.DISPLAY_NAME, sourceFile.name)
                 put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/Mobile Labs")
+                put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/OBSmobile")
                 put(MediaStore.Video.Media.IS_PENDING, 1)
             }
             val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values) ?: return null

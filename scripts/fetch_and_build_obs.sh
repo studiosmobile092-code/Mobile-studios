@@ -140,8 +140,22 @@ if p.exists():
         txt = txt.replace('CMAKE_SYSTEM_NAME MATCHES "Linux|FreeBSD|OpenBSD"', 'CMAKE_SYSTEM_NAME MATCHES "Linux|FreeBSD|OpenBSD|Android"')
         txt += '\nif(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android")\n  set(OS_LINUX ON)\n  set(OS_ANDROID ON)\n  set(OS_POSIX ON)\nendif()\n'
         p.write_text(txt, encoding="utf-8")
+# ECM (KDE Extra CMake Modules) is pulled in by cmake/linux/defaults.cmake.
+# Android cross builds do not need it. Make the include a no-op so configure
+# does not die with "Could not find a package configuration file provided by ECM".
+ecm = Path("cmake/linux/ecmconfig.cmake")
+if ecm.exists():
+    body = ecm.read_text(encoding="utf-8")
+    guard = 'if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android")\n  return()\nendif()\n'
+    if "return()" not in body.split("endif()", 1)[0]:
+        ecm.write_text(guard + body, encoding="utf-8")
 PYEOF
 popd >/dev/null
+
+if command -v sudo >/dev/null 2>&1; then
+  sudo apt-get update -qq || true
+  sudo apt-get install -y extra-cmake-modules || true
+fi
 
 echo "Building libobs ($ANDROID_ABI) via Android NDK toolchain..."
 OBS_BUILD_DIR="$THIRD_PARTY_DIR/build-obs-$ANDROID_ABI"
