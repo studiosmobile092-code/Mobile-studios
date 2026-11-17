@@ -1,4 +1,4 @@
-name: Mobile Labs Android CI
+name: OBSmobile Android CI
 
 on:
   push:
@@ -22,9 +22,9 @@ on:
         default: true
         type: boolean
       build_native_libobs:
-        description: 'Also build arm64-v8a native libobs APK + XAPK'
+        description: 'Also try experimental arm64-v8a native libobs build (currently broken)'
         required: true
-        default: true
+        default: false
         type: boolean
 
 jobs:
@@ -75,12 +75,12 @@ jobs:
             echo "STORE_PASSWORD=$SECRET_STORE_PASS" >> "$GITHUB_ENV"
             echo "KEY_PASSWORD=$SECRET_KEY_PASS" >> "$GITHUB_ENV"
           else
-            CI_PASS="mobilelabs-ci-upload"
+            CI_PASS="obsmobile-ci-upload"
             rm -f "$UPLOAD_KS"
             keytool -genkeypair -v -keystore "$UPLOAD_KS" \
               -storepass "$CI_PASS" -alias upload -keypass "$CI_PASS" \
               -keyalg RSA -keysize 2048 -validity 3650 \
-              -dname "CN=Mobile Labs CI,O=Mobile Labs,C=US"
+              -dname "CN=OBSmobile CI,O=OBSmobile,C=US"
             echo "KEYSTORE_PATH=$UPLOAD_KS" >> "$GITHUB_ENV"
             echo "STORE_PASSWORD=$CI_PASS" >> "$GITHUB_ENV"
             echo "KEY_PASSWORD=$CI_PASS" >> "$GITHUB_ENV"
@@ -107,10 +107,10 @@ jobs:
           mkdir -p dist/debug
           APK="app/build/outputs/apk/debug/app-debug.apk"
           test -f "$APK"
-          cp "$APK" dist/debug/mobile-labs-debug.apk
+          cp "$APK" dist/debug/obsmobile-debug.apk
           if [ "${{ inputs.package_xapk }}" != "false" ]; then
             chmod +x scripts/package_xapk.sh
-            bash scripts/package_xapk.sh "$APK" "${{ steps.ver.outputs.code }}" "${{ steps.ver.outputs.name }}" "dist/debug/mobile-labs-debug.xapk"
+            bash scripts/package_xapk.sh "$APK" "${{ steps.ver.outputs.code }}" "${{ steps.ver.outputs.name }}" "dist/debug/obsmobile-debug.xapk"
           fi
           sha256sum dist/debug/* | tee dist/debug/sha256.txt
 
@@ -121,10 +121,10 @@ jobs:
           mkdir -p dist/release
           APK="app/build/outputs/apk/release/app-release.apk"
           test -f "$APK"
-          cp "$APK" dist/release/mobile-labs-release.apk
+          cp "$APK" dist/release/obsmobile-release.apk
           if [ "${{ inputs.package_xapk }}" != "false" ]; then
             chmod +x scripts/package_xapk.sh
-            bash scripts/package_xapk.sh "$APK" "${{ steps.ver.outputs.code }}" "${{ steps.ver.outputs.name }}" "dist/release/mobile-labs-release.xapk"
+            bash scripts/package_xapk.sh "$APK" "${{ steps.ver.outputs.code }}" "${{ steps.ver.outputs.name }}" "dist/release/obsmobile-release.xapk"
           fi
           sha256sum dist/release/* | tee dist/release/sha256.txt
 
@@ -132,7 +132,7 @@ jobs:
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_variant != 'release' }}
         uses: actions/upload-artifact@v4
         with:
-          name: mobile-labs-debug-apk-xapk
+          name: obsmobile-debug-apk-xapk
           path: dist/debug/*
           retention-days: 30
 
@@ -140,13 +140,14 @@ jobs:
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_variant != 'debug' }}
         uses: actions/upload-artifact@v4
         with:
-          name: mobile-labs-release-apk-xapk
+          name: obsmobile-release-apk-xapk
           path: dist/release/*
           retention-days: 30
 
   build-native-libobs-apk:
-    name: Native libobs arm64-v8a NDK Build (APK + XAPK)
+    name: Native libobs arm64-v8a NDK Build (experimental)
     runs-on: ubuntu-latest
+    continue-on-error: true
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_native_libobs == true }}
 
     steps:
@@ -224,16 +225,16 @@ jobs:
           mkdir -p dist/native
           APK="app/build/outputs/apk/debug/app-debug.apk"
           test -f "$APK"
-          cp "$APK" dist/native/mobile-labs-libobs-arm64-v8a.apk
+          cp "$APK" dist/native/obsmobile-libobs-arm64-v8a.apk
           if [ "${{ inputs.package_xapk }}" != "false" ]; then
             chmod +x scripts/package_xapk.sh
-            bash scripts/package_xapk.sh "$APK" "${{ steps.ver.outputs.code }}" "${{ steps.ver.outputs.name }}" "dist/native/mobile-labs-libobs-arm64-v8a.xapk"
+            bash scripts/package_xapk.sh "$APK" "${{ steps.ver.outputs.code }}" "${{ steps.ver.outputs.name }}" "dist/native/obsmobile-libobs-arm64-v8a.xapk"
           fi
           sha256sum dist/native/* | tee dist/native/sha256.txt
 
       - name: Upload Native libobs APK & XAPK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mobile-labs-libobs-arm64-v8a
+          name: obsmobile-libobs-arm64-v8a
           path: dist/native/*
           retention-days: 30
