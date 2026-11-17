@@ -26,6 +26,7 @@ import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -134,6 +135,10 @@ class HardwareMediaPipeline(
     private var muxerAudioTrack = -1
     private var muxerMicAudioTrack = -1
     private var muxerGameAudioTrack = -1
+    private var muxerVideoCount = 0
+    private var muxerAudioCount = 0
+    private var muxerMicAudioCount = 0
+    private var muxerGameAudioCount = 0
     private var muxerStarted = false
     private var currentRecordFile: File? = null
     private var recordStartMs = 0L
@@ -146,6 +151,9 @@ class HardwareMediaPipeline(
     private var lastMuxerAudioPtsUs = -1L
     private var lastMuxerMicPtsUs = -1L
     private var lastMuxerGamePtsUs = -1L
+    private val segPublishExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "MobileLabs-SegPublish").apply { isDaemon = true }
+    }
 
     // Instant Replay Buffer
     val replayRingBuffer = ReplayGopRingBuffer()
@@ -202,6 +210,10 @@ class HardwareMediaPipeline(
                 muxerAudioTrack = -1
                 muxerMicAudioTrack = -1
                 muxerGameAudioTrack = -1
+                muxerVideoCount = 0
+                muxerAudioCount = 0
+                muxerMicAudioCount = 0
+                muxerGameAudioCount = 0
                 muxerStarted = false
                 currentRecordFile = target
                 val now = System.currentTimeMillis()
@@ -215,16 +227,18 @@ class HardwareMediaPipeline(
                 lastMuxerGamePtsUs = -1L
                 maybeStartMuxerLocked()
             }
-            requestKeyFrame()
             repository.markActiveRecording(target, recordStartMs)
             recordingActive.set(true)
+            requestKeyFrame()
             target
         } catch (t: Throwable) {
+            recordingActive.set(false)
             synchronized(muxerLock) {
                 runCatching { muxer?.release() }
                 muxer = null
                 currentRecordFile = null
             }
+            repository.clearActiveRecordingMarker()
             runCatching { target.delete() }
             onRecordingError("Muxer start failed: ${t.message}")
             null
@@ -251,14 +265,29 @@ class HardwareMediaPipeline(
     fun isRecordingPaused(): Boolean = synchronized(muxerLock) { ptsRebaser.isPaused }
 
     fun stopRecording() {
+        if (!recordingActive.get()) return
+        // Briefly give an already-triggered start/stop an initial IDR + first frames if none written yet
+        synchronized(muxerLock) {
+            if (muxer != null && (!muxerStarted || muxerVideoCount == 0)) {
+                @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
+                runCatching { (muxerLock as Object).wait(250L) }
+            }
+        }
         if (!recordingActive.getAndSet(false)) return
+
         val file: File?
         val durationSec: Long
+        var muxerStopOk = false
+        var videoFrames = 0
+        var muxerStopErr: String? = null
         synchronized(muxerLock) {
             file = currentRecordFile
             durationSec = maxOf(1L, (System.currentTimeMillis() - segmentStartMs) / 1000L)
-            runCatching {
-                if (muxerStarted) muxer?.stop()
+            videoFrames = muxerVideoCount
+            if (muxerStarted && muxer != null && videoFrames > 0) {
+                runCatching { muxer?.stop() }
+                    .onSuccess { muxerStopOk = true }
+                    .onFailure { err -> muxerStopErr = err.message }
             }
             runCatching { muxer?.release() }
             muxer = null
@@ -267,20 +296,24 @@ class HardwareMediaPipeline(
             muxerAudioTrack = -1
             muxerMicAudioTrack = -1
             muxerGameAudioTrack = -1
+            muxerVideoCount = 0
+            muxerAudioCount = 0
+            muxerMicAudioCount = 0
+            muxerGameAudioCount = 0
             currentRecordFile = null
             ptsRebaser.reset()
         }
         repository.clearActiveRecordingMarker()
-        val playable = file != null && file.exists() && file.length() > 1024L && repository.verifyMediaPlayable(file)
-        val hasBytes = file != null && file.exists() && file.length() > 8192L
-        if (playable || hasBytes) {
-            finalizeAndPublishFile(file!!, durationSec)
-            if (!playable) {
-                onRecordingError("Recording saved, but the player check failed. Open it from Movies/OBSmobile.")
-            }
+        if (muxerStopOk && file != null && file.exists() && file.length() > 1024L && repository.verifyMediaPlayable(file)) {
+            finalizeAndPublishFile(file, durationSec)
         } else {
             runCatching { file?.delete() }
-            onRecordingError("Recording too short — encoder never produced a keyframe. Arm capture, wait 2 seconds, then record again.")
+            val msg = when {
+                videoFrames == 0 -> "Recording too short — no playable frames captured"
+                muxerStopErr != null -> "Recording finalize failed: $muxerStopErr"
+                else -> "Recording failed verification ($videoFrames video frames)"
+            }
+            onRecordingError(msg)
         }
     }
 
@@ -302,12 +335,12 @@ class HardwareMediaPipeline(
     fun publishBitmapScreenshot(bitmap: Bitmap): String? {
         return runCatching {
             val stamp = MediaFileAllocator.currentTimestamp()
-            val fileName = "OBSmobile_Shot_$stamp.png"
+            val fileName = "MobileLabs_Shot_$stamp.png"
             val resolver = context.contentResolver
             val values = ContentValues().apply {
                 put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
                 put(MediaStore.Images.Media.MIME_TYPE, "image/png")
-                put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/OBSmobile")
+                put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/Mobile Labs")
                 put(MediaStore.Images.Media.IS_PENDING, 1)
             }
             val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
@@ -431,7 +464,7 @@ class HardwareMediaPipeline(
 
     private fun queuePcmIntoCodec(codec: MediaCodec, pcm16Stereo: ShortArray, sampleCount: Int, ptsUs: Long) {
         runCatching {
-            val inIdx = codec.dequeueInputBuffer(0)
+            val inIdx = codec.dequeueInputBuffer(5_000L)
             if (inIdx >= 0) {
                 val buf = codec.getInputBuffer(inIdx) ?: return
                 buf.clear()
@@ -454,10 +487,11 @@ class HardwareMediaPipeline(
         }
         replayRingBuffer.clear()
 
-        videoRunning.set(false)
         onEncoderSurfaceReady(null)
         runCatching { videoEncoder?.signalEndOfInputStream() }
-        runCatching { videoDrainThread?.join(500) }
+        runCatching { videoDrainThread?.join(250) }
+        videoRunning.set(false)
+        runCatching { videoDrainThread?.join(400) }
         videoDrainThread = null
         runCatching { videoEncoder?.stop(); videoEncoder?.release() }
         runCatching { videoInputSurface?.release() }
@@ -490,6 +524,7 @@ class HardwareMediaPipeline(
         bytesInWindow = 0L
         lastBitrateSampleMs = 0L
         currentBitrateKbps.set(0)
+        segPublishExecutor.shutdown()
     }
 
     fun getEncoderQueueDepth(): Int = namedSenders.values.maxOfOrNull { it.queueDepth() } ?: 0
@@ -503,7 +538,7 @@ class HardwareMediaPipeline(
     fun getRecordingBytesWritten(): Long = recordBytesWritten.get()
 
     private fun allocateRecordingFile(): File =
-        MediaFileAllocator.allocateTimestampedFile(repository.recordingsDir, "OBSmobile", "mp4")
+        MediaFileAllocator.allocateTimestampedFile(repository.recordingsDir, "MobileLabs", "mp4")
 
     private fun finalizeAndPublishFile(file: File, durationSec: Long) {
         val sizeBytes = file.length()
@@ -532,7 +567,7 @@ class HardwareMediaPipeline(
                 )
                 setInteger(MediaFormat.KEY_BIT_RATE, cfg.videoBitrateKbps * 1000)
                 setInteger(MediaFormat.KEY_FRAME_RATE, cfg.fps)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, cfg.keyframeIntervalSec.coerceAtLeast(1))
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, cfg.keyframeIntervalSec)
                 setInteger(
                     MediaFormat.KEY_BITRATE_MODE,
                     MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
@@ -642,6 +677,9 @@ class HardwareMediaPipeline(
                         }
                     }
                     runCatching { codec.releaseOutputBuffer(idx, false) }
+                    if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                        break
+                    }
                 }
             }
         }
@@ -650,10 +688,13 @@ class HardwareMediaPipeline(
     private fun rotateRecordingSegmentLocked() {
         val oldFile: File?
         val oldDur: Long
+        var oldStopOk = false
         synchronized(muxerLock) {
             oldFile = currentRecordFile
             oldDur = maxOf(1L, (System.currentTimeMillis() - segmentStartMs) / 1000L)
-            runCatching { if (muxerStarted) muxer?.stop() }
+            if (muxerStarted && muxerVideoCount > 0) {
+                runCatching { muxer?.stop() }.onSuccess { oldStopOk = true }
+            }
             runCatching { muxer?.release() }
             val nextFile = allocateRecordingFile()
             muxer = MediaMuxer(nextFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
@@ -661,9 +702,14 @@ class HardwareMediaPipeline(
             muxerAudioTrack = -1
             muxerMicAudioTrack = -1
             muxerGameAudioTrack = -1
+            muxerVideoCount = 0
+            muxerAudioCount = 0
+            muxerMicAudioCount = 0
+            muxerGameAudioCount = 0
             muxerStarted = false
             currentRecordFile = nextFile
             segmentStartMs = System.currentTimeMillis()
+            recordBytesWritten.set(0L)
             ptsRebaser.reset()
             lastMuxerVideoPtsUs = -1L
             lastMuxerAudioPtsUs = -1L
@@ -672,8 +718,8 @@ class HardwareMediaPipeline(
             maybeStartMuxerLocked()
             repository.markActiveRecording(nextFile, segmentStartMs)
         }
-        if (oldFile != null && oldFile.exists() && oldFile.length() > 1024L) {
-            Thread({ finalizeAndPublishFile(oldFile, oldDur) }, "MobileLabs-SegPublish").start()
+        if (oldStopOk && oldFile != null && oldFile.exists() && oldFile.length() > 1024L && !segPublishExecutor.isShutdown) {
+            segPublishExecutor.execute { finalizeAndPublishFile(oldFile, oldDur) }
         }
     }
 
@@ -694,31 +740,35 @@ class HardwareMediaPipeline(
             }
 
             if (multiTrackActive) {
-                val micFmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, 48000, 2).apply {
-                    setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-                    setInteger(MediaFormat.KEY_BIT_RATE, audioBitrateKbps * 1000)
-                    setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
-                }
-                val micCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
-                micCodec.configure(micFmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                micCodec.start()
-                micAudioEncoder = micCodec
-                micAudioDrainThread = Thread({ drainIsolatedAudioLoop(micCodec, trackSlot = 2) }, "MobileLabs-MicEnc").apply {
-                    start()
-                }
+                runCatching {
+                    val micFmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, 48000, 2).apply {
+                        setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                        setInteger(MediaFormat.KEY_BIT_RATE, audioBitrateKbps * 1000)
+                        setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
+                    }
+                    val micCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
+                    micCodec.configure(micFmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                    micCodec.start()
+                    micAudioEncoder = micCodec
+                    micAudioDrainThread = Thread({ drainIsolatedAudioLoop(micCodec, trackSlot = 2) }, "MobileLabs-MicEnc").apply {
+                        start()
+                    }
+                }.onFailure { micAudioEncoder = null }
 
-                val gameFmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, 48000, 2).apply {
-                    setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-                    setInteger(MediaFormat.KEY_BIT_RATE, audioBitrateKbps * 1000)
-                    setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
-                }
-                val gameCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
-                gameCodec.configure(gameFmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                gameCodec.start()
-                gameAudioEncoder = gameCodec
-                gameAudioDrainThread = Thread({ drainIsolatedAudioLoop(gameCodec, trackSlot = 3) }, "MobileLabs-GameEnc").apply {
-                    start()
-                }
+                runCatching {
+                    val gameFmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, 48000, 2).apply {
+                        setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                        setInteger(MediaFormat.KEY_BIT_RATE, audioBitrateKbps * 1000)
+                        setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
+                    }
+                    val gameCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
+                    gameCodec.configure(gameFmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                    gameCodec.start()
+                    gameAudioEncoder = gameCodec
+                    gameAudioDrainThread = Thread({ drainIsolatedAudioLoop(gameCodec, trackSlot = 3) }, "MobileLabs-GameEnc").apply {
+                        start()
+                    }
+                }.onFailure { gameAudioEncoder = null }
             }
         }
     }
@@ -807,16 +857,16 @@ class HardwareMediaPipeline(
         }
     }
 
-    private fun maybeStartMuxerLocked(forceVideoOnly: Boolean = false) {
+    private fun maybeStartMuxerLocked() {
         val m = muxer ?: return
         if (muxerStarted) return
         val vFmt = currentVideoFormat ?: return
         val aFmt = currentAudioFormat
-        if (!forceVideoOnly && aFmt == null && audioEncoder != null) return
-        val micFmt = if (!forceVideoOnly && multiTrackActive && micAudioEncoder != null) currentMicAudioFormat else null
-        if (!forceVideoOnly && multiTrackActive && micAudioEncoder != null && micFmt == null) return
-        val gameFmt = if (!forceVideoOnly && multiTrackActive && gameAudioEncoder != null) currentGameAudioFormat else null
-        if (!forceVideoOnly && multiTrackActive && gameAudioEncoder != null && gameFmt == null) return
+        if (aFmt == null && audioEncoder != null) return
+        val micFmt = if (multiTrackActive && micAudioEncoder != null) currentMicAudioFormat else null
+        if (multiTrackActive && micAudioEncoder != null && micFmt == null) return
+        val gameFmt = if (multiTrackActive && gameAudioEncoder != null) currentGameAudioFormat else null
+        if (multiTrackActive && gameAudioEncoder != null && gameFmt == null) return
 
         muxerVideoTrack = m.addTrack(vFmt)
         if (aFmt != null) {
@@ -830,6 +880,8 @@ class HardwareMediaPipeline(
         }
         m.start()
         muxerStarted = true
+        @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
+        runCatching { (muxerLock as Object).notifyAll() }
     }
 
     private fun writeMuxerSample(
@@ -844,9 +896,6 @@ class HardwareMediaPipeline(
             val m = muxer ?: return
             if (!muxerStarted) {
                 maybeStartMuxerLocked()
-                if (!muxerStarted && isVideo) {
-                    maybeStartMuxerLocked(forceVideoOnly = true)
-                }
                 if (!muxerStarted) return
             }
             val track = when {
@@ -857,8 +906,7 @@ class HardwareMediaPipeline(
             }
             if (track < 0) return
 
-            val effectiveKey = isKey || (isVideo && annexBContainsIdrOrSps(rawBytes))
-            var rebasedPts = ptsRebaser.filterAndRebase(isVideo, effectiveKey, info.presentationTimeUs)
+            var rebasedPts = ptsRebaser.filterAndRebase(isVideo, isKey, info.presentationTimeUs)
             if (rebasedPts < 0L) return
 
             when {
@@ -884,6 +932,18 @@ class HardwareMediaPipeline(
             val writeOk = runCatching {
                 m.writeSampleData(track, ByteBuffer.wrap(rawBytes), muxerSampleInfo)
                 recordBytesWritten.addAndGet(rawBytes.size.toLong())
+                when {
+                    isVideo -> {
+                        muxerVideoCount++
+                        if (muxerVideoCount == 1) {
+                            @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
+                            runCatching { (muxerLock as Object).notifyAll() }
+                        }
+                    }
+                    audioTrackSlot == 2 -> muxerMicAudioCount++
+                    audioTrackSlot == 3 -> muxerGameAudioCount++
+                    else -> muxerAudioCount++
+                }
             }.onFailure { err ->
                 recordingActive.set(false)
                 val failedFile = currentRecordFile
@@ -891,6 +951,10 @@ class HardwareMediaPipeline(
                 runCatching { m.release() }
                 muxer = null
                 muxerStarted = false
+                muxerVideoCount = 0
+                muxerAudioCount = 0
+                muxerMicAudioCount = 0
+                muxerGameAudioCount = 0
                 currentRecordFile = null
                 ptsRebaser.reset()
                 repository.clearActiveRecordingMarker()
@@ -901,29 +965,6 @@ class HardwareMediaPipeline(
             }.isSuccess
             if (!writeOk) return
         }
-    }
-
-
-    /** Some encoders omit BUFFER_FLAG_KEY_FRAME on the first IDR. Scan Annex-B for SPS (7) or IDR (5). */
-    private fun annexBContainsIdrOrSps(data: ByteArray): Boolean {
-        var i = 0
-        while (i + 4 < data.size) {
-            val sc4 = data[i].toInt() == 0 && data[i + 1].toInt() == 0 && data[i + 2].toInt() == 0 && data[i + 3].toInt() == 1
-            val sc3 = data[i].toInt() == 0 && data[i + 1].toInt() == 0 && data[i + 2].toInt() == 1
-            val start = when {
-                sc4 -> 4
-                sc3 -> 3
-                else -> 0
-            }
-            if (start > 0 && i + start < data.size) {
-                val nal = data[i + start].toInt() and 0x1F
-                if (nal == 5 || nal == 7) return true
-                i += start + 1
-            } else {
-                i++
-            }
-        }
-        return false
     }
 
     private fun extractAvcConfig(fmt: MediaFormat) {
@@ -982,7 +1023,7 @@ class HardwareMediaPipeline(
             val values = ContentValues().apply {
                 put(MediaStore.Video.Media.DISPLAY_NAME, sourceFile.name)
                 put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/OBSmobile")
+                put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/Mobile Labs")
                 put(MediaStore.Video.Media.IS_PENDING, 1)
             }
             val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values) ?: return null

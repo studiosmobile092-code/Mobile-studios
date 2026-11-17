@@ -10,7 +10,7 @@ THIRD_PARTY_DIR="$CPP_DIR/third_party"
 DEPS_SRC_DIR="$THIRD_PARTY_DIR/deps-src"
 DEPS_PREFIX="$THIRD_PARTY_DIR/deps-install-arm64-v8a"
 PREBUILT_DIR="$CPP_DIR/prebuilt/arm64-v8a"
-JNILIBS_DIR="$CPP_DIR/jniLibs/arm64-v8a"
+JNILIBS_DIR="$ROOT_DIR/app/src/main/jniLibs/arm64-v8a"
 
 OBS_COMMIT="57bfcf10a"
 JANSSON_TAG="v2.14"
@@ -26,7 +26,28 @@ fi
 export CMAKE_POLICY_VERSION_MINIMUM=3.5
 
 if [ -z "${ANDROID_NDK_HOME:-}" ]; then
-  echo "ERROR: ANDROID_NDK_HOME is not set. Point it to NDK 27+."
+  echo "ERROR: ANDROID_NDK_HOME is not set. Point it to NDK 27+." >&2
+  exit 1
+fi
+
+if [ -z "${OBS_ANDROID_FORK_DIR:-}" ]; then
+  cat >&2 <<'EOF'
+ERROR: Upstream obs-studio (32.2.1 / commit 57bfcf10a) does NOT support Android NDK cross-compilation.
+Forcing OS_LINUX=ON triggers Linux desktop dependencies unavailable in Android Bionic/NDK:
+  - CMake: KDE Extra CMake Modules (ECM via cmake/linux/ecmconfig.cmake)
+  - Libraries: libuuid, X11/XCB/GLX, Wayland/EGL, D-Bus/Gio, PulseAudio/PipeWire, mbedTLS, x264
+  - Platform code: platform-nix.c (pthread_cancel, execinfo.h), obs-nix-*.c, gl-nix.c (no ANativeWindow winsys)
+
+Mobile Labs production streaming/recording runs on the pure Android-native pipeline
+(MediaProjection + GlZeroCopyCompositor GLES3 + AudioCaptureMixer + MediaCodec + RtmpFlvSender).
+If you maintain a custom Android-ported libobs fork, set OBS_ANDROID_FORK_DIR=/path/to/obs-android-fork.
+EOF
+  exit 2
+fi
+
+OBS_SRC_DIR="$OBS_ANDROID_FORK_DIR"
+if [ ! -f "$OBS_SRC_DIR/libobs/obs.h" ]; then
+  echo "ERROR: OBS_ANDROID_FORK_DIR ($OBS_SRC_DIR) does not contain libobs/obs.h" >&2
   exit 1
 fi
 
@@ -121,47 +142,11 @@ if [ ! -f "$DEPS_PREFIX/lib/libavcodec.a" ]; then
   popd >/dev/null
 fi
 
-# 4. Checkout & build pinned obs-studio libobs
-if [ ! -d "$THIRD_PARTY_DIR/obs-studio/.git" ]; then
-  echo "Cloning obs-studio at pinned commit $OBS_COMMIT..."
-  git clone --filter=blob:none https://github.com/obsproject/obs-studio.git "$THIRD_PARTY_DIR/obs-studio"
-fi
-
-pushd "$THIRD_PARTY_DIR/obs-studio" >/dev/null
-git fetch --depth 1 origin "$OBS_COMMIT" || true
-git checkout "$OBS_COMMIT"
-# Allow obs-studio osconfig.cmake to treat Android NDK as POSIX/Linux-like host target cleanly
-python3 - <<'PYEOF'
-from pathlib import Path
-p = Path("cmake/common/osconfig.cmake")
-if p.exists():
-    txt = p.read_text(encoding="utf-8")
-    if "OS_ANDROID" not in txt:
-        txt = txt.replace('CMAKE_SYSTEM_NAME MATCHES "Linux|FreeBSD|OpenBSD"', 'CMAKE_SYSTEM_NAME MATCHES "Linux|FreeBSD|OpenBSD|Android"')
-        txt += '\nif(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android")\n  set(OS_LINUX ON)\n  set(OS_ANDROID ON)\n  set(OS_POSIX ON)\nendif()\n'
-        p.write_text(txt, encoding="utf-8")
-# ECM (KDE Extra CMake Modules) is pulled in by cmake/linux/defaults.cmake.
-# Android cross builds do not need it. Make the include a no-op so configure
-# does not die with "Could not find a package configuration file provided by ECM".
-ecm = Path("cmake/linux/ecmconfig.cmake")
-if ecm.exists():
-    body = ecm.read_text(encoding="utf-8")
-    guard = 'if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android")\n  return()\nendif()\n'
-    if "return()" not in body.split("endif()", 1)[0]:
-        ecm.write_text(guard + body, encoding="utf-8")
-PYEOF
-popd >/dev/null
-
-if command -v sudo >/dev/null 2>&1; then
-  sudo apt-get update -qq || true
-  sudo apt-get install -y extra-cmake-modules || true
-fi
-
-echo "Building libobs ($ANDROID_ABI) via Android NDK toolchain..."
+echo "Building Android-ported libobs ($ANDROID_ABI) via Android NDK toolchain (target: libobs only)..."
 OBS_BUILD_DIR="$THIRD_PARTY_DIR/build-obs-$ANDROID_ABI"
 export PKG_CONFIG_LIBDIR="$DEPS_PREFIX/lib/pkgconfig"
 
-cmake -S "$THIRD_PARTY_DIR/obs-studio" -B "$OBS_BUILD_DIR" \
+cmake -S "$OBS_SRC_DIR" -B "$OBS_BUILD_DIR" \
   -G Ninja \
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
   -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
@@ -182,45 +167,17 @@ cmake -S "$THIRD_PARTY_DIR/obs-studio" -B "$OBS_BUILD_DIR" \
   -DENABLE_UI=OFF \
   -DENABLE_SCRIPTING=OFF \
   -DENABLE_PLUGINS=OFF \
-  -DENABLE_X11=OFF \
-  -DENABLE_WAYLAND=OFF \
-  -DENABLE_PULSEAUDIO=OFF \
-  -DENABLE_PIPEWIRE=OFF \
-  -DENABLE_ALSA=OFF \
-  -DENABLE_JACK=OFF \
-  -DENABLE_SNDIO=OFF \
-  -DENABLE_V4L2=OFF \
-  -DENABLE_FREETYPE=OFF \
-  -DENABLE_FONTCONFIG=OFF \
-  -DENABLE_LIBFDK=OFF \
-  -DENABLE_SPEEXDSP=OFF \
-  -DENABLE_RNNOISE=OFF \
-  -DENABLE_RTMPS=OFF \
-  -DENABLE_GIO=OFF \
-  -DENABLE_DBUS=OFF \
   -DENABLE_BROWSER=OFF \
-  -DENABLE_VST=OFF \
-  -DENABLE_VIRTUALCAM=OFF \
-  -DENABLE_WEBRTC=OFF \
-  -DENABLE_AJA=OFF \
-  -DENABLE_DECKLINK=OFF \
-  -DENABLE_NEW_MPEGTS_OUTPUT=OFF \
-  -DENABLE_QSV11=OFF \
-  -DENABLE_VLC=OFF \
+  -DENABLE_RTMPS=OFF \
   -DBUILD_TESTS=OFF
 
 cmake --build "$OBS_BUILD_DIR" --target libobs --parallel "$(nproc)"
 
-# Anti-stale-plugin trap: clean prebuilt + jniLibs staging and verify SHA-256 hash
 rm -f "$PREBUILT_DIR/"*.so "$JNILIBS_DIR/"*.so
 cp "$OBS_BUILD_DIR/libobs/libobs.so" "$PREBUILT_DIR/libobs.so"
 cp "$OBS_BUILD_DIR/libobs/libobs.so" "$JNILIBS_DIR/libobs.so"
-if [ -f "$OBS_BUILD_DIR/libobs-opengl/libobs-opengl.so" ]; then
-  cp "$OBS_BUILD_DIR/libobs-opengl/libobs-opengl.so" "$PREBUILT_DIR/libobs-opengl.so"
-  cp "$OBS_BUILD_DIR/libobs-opengl/libobs-opengl.so" "$JNILIBS_DIR/libobs-opengl.so"
-fi
 cp -R "$OBS_BUILD_DIR/config/"* "$PREBUILT_DIR/include/" 2>/dev/null || true
 
 sha256sum "$PREBUILT_DIR/libobs.so" > "$PREBUILT_DIR/libobs.so.sha256"
-echo "Staged libobs.so cleanly into prebuilt + jniLibs:"
+echo "Staged libobs.so cleanly into app/src/main/jniLibs/arm64-v8a:"
 cat "$PREBUILT_DIR/libobs.so.sha256"

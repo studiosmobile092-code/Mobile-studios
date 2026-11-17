@@ -274,7 +274,7 @@ class KeystoreSecretStore(private val context: Context) {
                 out = out.replace(extra, "[REDACTED_KEY]")
             }
             out = out.replace(
-                Regex("(rtmps?://[^/\\s]+/[^/\\s]+/)([^\\s]+)"),
+                Regex("(rtmps?://[^/\\s]+/(?:[^/\\s]+/)+)([^\\s]+)"),
                 "$1[REDACTED]"
             )
             out = out.replace(

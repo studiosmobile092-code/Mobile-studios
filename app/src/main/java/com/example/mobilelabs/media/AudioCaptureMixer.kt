@@ -28,6 +28,7 @@ import com.example.mobilelabs.model.VoiceEffectPreset
 import java.io.File
 import java.nio.ByteOrder
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.PI
 import kotlin.math.abs
@@ -460,16 +461,22 @@ class AudioCaptureMixer(
         mediaAudioFifo.push(samples, count)
     }
 
+    private val sfxExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "MobileLabs-SfxDecode").apply { isDaemon = true }
+    }
+
     fun triggerSoundboardPad(pad: SoundboardPad) {
         val vol = pad.volume.coerceIn(0f, 1.5f)
         val path = pad.filePath
         if (!path.isNullOrBlank()) {
-            Thread({
-                val pcm = loadOrDecodeSfxFile(path)
-                if (pcm != null && pcm.isNotEmpty()) {
-                    activeSfxClips.add(ActiveSfxPlayback(pcm, vol))
+            if (!sfxExecutor.isShutdown) {
+                sfxExecutor.execute {
+                    val pcm = loadOrDecodeSfxFile(path)
+                    if (pcm != null && pcm.isNotEmpty()) {
+                        activeSfxClips.add(ActiveSfxPlayback(pcm, vol))
+                    }
                 }
-            }, "MobileLabs-SfxDecode").start()
+            }
             return
         }
         val tone = synthesizeBuiltInSfx(pad.builtInTone ?: "CHIME")
@@ -757,7 +764,7 @@ class AudioCaptureMixer(
             if (pRec != null && gameMaxAbs == 0) {
                 consecutiveGameSilenceFrames++
                 if (consecutiveGameSilenceFrames > 140) {
-                    gameUnavailableReason = "System audio silent or blocked by foreground app"
+                    gameUnavailableReason = "No game/media audio detected yet (or foreground app blocks capture)"
                 }
             } else if (gameMaxAbs > 4) {
                 consecutiveGameSilenceFrames = 0
@@ -972,6 +979,7 @@ class AudioCaptureMixer(
         runCatching { micRecord?.stop(); micRecord?.release() }
         playbackRecord = null
         micRecord = null
+        sfxExecutor.shutdown()
         mediaAudioFifo.clear()
         activeSfxClips.clear()
         synchronized(decodedSfxCache) {

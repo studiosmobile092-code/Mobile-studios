@@ -83,20 +83,24 @@ class MainActivity : ComponentActivity() {
                     contract = ActivityResultContracts.StartActivityForResult()
                 ) { result ->
                     if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-                        val activeScene = state.sceneCollection.scenes.firstOrNull {
-                            it.id == state.programSceneId
-                        } ?: state.sceneCollection.scenes.firstOrNull {
-                            it.id == state.sceneCollection.activeSceneId
+                        val liveState = controller.uiState.value
+                        val programScene = liveState.sceneCollection.scenes.firstOrNull {
+                            it.id == liveState.programSceneId
+                        } ?: liveState.sceneCollection.scenes.firstOrNull {
+                            it.id == liveState.sceneCollection.activeSceneId
                         }
-                        val usesCam = activeScene?.sources?.any {
-                            it.type == SourceType.CAMERA_2 && it.visible
-                        } == true
+                        val previewScene = if (liveState.studioModeEnabled) {
+                            liveState.sceneCollection.scenes.firstOrNull { it.id == liveState.previewSceneId }
+                        } else null
+                        val usesCam = listOfNotNull(programScene, previewScene).any { scene ->
+                            scene.sources.any { it.type == SourceType.CAMERA_2 && it.visible }
+                        }
                         val svcIntent = Intent(this, CaptureForegroundService::class.java).apply {
                             action = CaptureForegroundService.ACTION_ARM_PROJECTION
                             putExtra(CaptureForegroundService.EXTRA_RESULT_CODE, result.resultCode)
                             putExtra(CaptureForegroundService.EXTRA_RESULT_DATA, result.data)
-                            putExtra(CaptureForegroundService.EXTRA_USE_MIC, state.hasMicPermission)
-                            putExtra(CaptureForegroundService.EXTRA_USE_CAM, usesCam && state.hasCameraPermission)
+                            putExtra(CaptureForegroundService.EXTRA_USE_MIC, liveState.hasMicPermission)
+                            putExtra(CaptureForegroundService.EXTRA_USE_CAM, usesCam && liveState.hasCameraPermission)
                         }
                         ContextCompat.startForegroundService(this, svcIntent)
                     } else {
@@ -183,17 +187,23 @@ class MainActivity : ComponentActivity() {
 
                 fun requestPermissionsAndArm() {
                     controller.beginArming()
+                    val liveState = controller.uiState.value
                     val needed = mutableListOf<String>()
-                    if (!state.hasMicPermission) needed += Manifest.permission.RECORD_AUDIO
-                    if (!state.hasCameraPermission) {
-                        val activeScene = state.sceneCollection.scenes.firstOrNull {
-                            it.id == state.sceneCollection.activeSceneId
+                    if (!liveState.hasMicPermission) needed += Manifest.permission.RECORD_AUDIO
+                    if (!liveState.hasCameraPermission) {
+                        val relevantIds = buildSet {
+                            add(liveState.sceneCollection.activeSceneId)
+                            add(liveState.programSceneId)
+                            if (liveState.studioModeEnabled) add(liveState.previewSceneId)
                         }
-                        if (activeScene?.sources?.any { it.type == SourceType.CAMERA_2 } == true) {
+                        val hasCamSource = liveState.sceneCollection.scenes
+                            .filter { it.id in relevantIds }
+                            .any { scene -> scene.sources.any { it.type == SourceType.CAMERA_2 } }
+                        if (hasCamSource) {
                             needed += Manifest.permission.CAMERA
                         }
                     }
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !state.hasNotificationPermission) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !liveState.hasNotificationPermission) {
                         needed += Manifest.permission.POST_NOTIFICATIONS
                     }
                     if (needed.isNotEmpty()) {

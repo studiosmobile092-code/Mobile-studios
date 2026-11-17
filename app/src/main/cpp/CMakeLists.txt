@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(OBS_THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/obs-studio")
 set(OBS_BUILD_PREBUILT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/prebuilt/${ANDROID_ABI}")
-set(OBS_JNILIBS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/jniLibs/${ANDROID_ABI}")
+set(OBS_JNILIBS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}")
 
 if(NOT EXISTS "${OBS_THIRD_PARTY_DIR}/libobs/obs.h")
     message(FATAL_ERROR "libobs headers missing at ${OBS_THIRD_PARTY_DIR}. Run scripts/fetch_and_build_obs.sh first.")

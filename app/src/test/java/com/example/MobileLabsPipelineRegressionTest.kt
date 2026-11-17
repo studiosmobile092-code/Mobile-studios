@@ -23,6 +23,7 @@ import com.example.mobilelabs.persistence.ObsJsonImporterExporter
 import com.example.mobilelabs.persistence.SceneCollectionRepository
 import com.example.mobilelabs.platform.OAuthPkceManager
 import com.example.mobilelabs.platform.TwitchIrcChatClient
+import com.example.mobilelabs.security.KeystoreSecretStore
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -347,5 +348,39 @@ class MobileLabsPipelineRegressionTest {
         val upsampled = MediaSourceDecoder.resampleTo48kStereo(mono44k, mono44k.size, srcRate = 44100, srcChannels = 1)
         assertEquals(480 * 2, upsampled.size)
         assertEquals(upsampled[0], upsampled[1])
+    }
+
+    @Test
+    fun `RtmpProtocolParser extracts numeric streamId from createStream _result command`() {
+        val baos = ByteArrayOutputStream()
+        val dos = DataOutputStream(baos)
+        val cmd = "_result".toByteArray(Charsets.UTF_8)
+        dos.writeByte(0x02)
+        dos.writeShort(cmd.size)
+        dos.write(cmd)
+        dos.writeByte(0x00)
+        dos.writeDouble(2.0) // transactionId
+        dos.writeByte(0x05) // null properties
+        dos.writeByte(0x00)
+        dos.writeDouble(4.0) // negotiated streamId
+
+        val parsed = RtmpProtocolParser.parseAmf0Command(baos.toByteArray())
+        assertEquals("_result", parsed.commandName)
+        assertEquals(2.0, parsed.transactionId, 0.0001)
+        assertEquals(4.0, parsed.resultNumber, 0.0001)
+    }
+
+    @Test
+    fun `KeystoreSecretStore redactUrlAndKeys redacts single and multi-segment RTMP keys and query tokens`() {
+        val singleSeg = KeystoreSecretStore.redactUrlAndKeys("Error on rtmp://live.twitch.tv/app/live_12345_secret")
+        assertTrue(!singleSeg.contains("live_12345_secret"))
+        assertEquals("Error on rtmp://live.twitch.tv/app/[REDACTED]", singleSeg)
+
+        val multiSeg = KeystoreSecretStore.redactUrlAndKeys("Failed rtmps://a.rtmps.youtube.com:443/live2/subpath/yt-secret-xyz")
+        assertTrue(!multiSeg.contains("yt-secret-xyz"))
+        assertEquals("Failed rtmps://a.rtmps.youtube.com:443/live2/subpath/[REDACTED]", multiSeg)
+
+        val tokenQuery = KeystoreSecretStore.redactUrlAndKeys("oauth:abc999 token=xyz789")
+        assertEquals("oauth:[REDACTED] token=[REDACTED]", tokenQuery)
     }
 }

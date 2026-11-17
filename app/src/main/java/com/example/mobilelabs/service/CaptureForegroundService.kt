@@ -51,6 +51,9 @@ class CaptureForegroundService : Service() {
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var overlay: FloatingApertureOverlay? = null
+    private var lastDensityDpi: Int = DisplayMetrics.DENSITY_DEFAULT
+    private var activeUseMic: Boolean = false
+    private var activeUseCam: Boolean = false
 
     private val screenOffReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -69,6 +72,11 @@ class CaptureForegroundService : Service() {
         }
 
         override fun onCapturedContentResize(width: Int, height: Int) {
+            if (width > 0 && height > 0) {
+                runCatching {
+                    virtualDisplay?.resize(width, height, lastDensityDpi.coerceAtLeast(DisplayMetrics.DENSITY_MEDIUM))
+                }
+            }
             val app = application as MobileLabsApp
             app.sessionController.onCapturedContentResized(width, height)
         }
@@ -150,8 +158,10 @@ class CaptureForegroundService : Service() {
                 val useMic = intent.getBooleanExtra(EXTRA_USE_MIC, false)
                 val useCam = intent.getBooleanExtra(EXTRA_USE_CAM, false)
 
-                startForegroundWithActiveTypes(useMic, useCam)
                 if (resultCode == Activity.RESULT_OK && dataIntent != null) {
+                    activeUseMic = useMic
+                    activeUseCam = useCam
+                    startForegroundWithActiveTypes(useMic, useCam)
                     attachMediaProjection(resultCode, dataIntent)
                 } else {
                     app.sessionController.onArmFailed("MediaProjection permission canceled")
@@ -165,13 +175,17 @@ class CaptureForegroundService : Service() {
             ACTION_SAVE_REPLAY -> app.sessionController.saveReplayClip()
             ACTION_SCREENSHOT -> app.sessionController.captureCanvasScreenshot()
             ACTION_DISARM -> {
+                activeUseMic = false
+                activeUseCam = false
                 releaseVirtualDisplayAndProjection()
                 app.sessionController.disarmSession()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
             ACTION_SYNC_OVERLAY -> {
-                startForegroundWithActiveTypes(useMic = false, useCam = false)
+                if (mediaProjection != null) {
+                    startForegroundWithActiveTypes(useMic = activeUseMic, useCam = activeUseCam)
+                }
             }
         }
         return START_NOT_STICKY
@@ -211,7 +225,8 @@ class CaptureForegroundService : Service() {
         proj.registerCallback(projectionCallback, mainHandler)
 
         val displayInfo = DisplayGeometryCompat.readDefaultDisplay(this)
-        val densityDpi = resources.displayMetrics.densityDpi
+        val densityDpi = resources.displayMetrics.densityDpi.coerceAtLeast(DisplayMetrics.DENSITY_MEDIUM)
+        lastDensityDpi = densityDpi
 
         app.sessionController.attachArmedProjection(
             mediaProjection = proj,
@@ -229,12 +244,13 @@ class CaptureForegroundService : Service() {
         canvasHeight: Int,
         densityDpi: Int
     ) {
+        lastDensityDpi = densityDpi.coerceAtLeast(DisplayMetrics.DENSITY_MEDIUM)
         runCatching { virtualDisplay?.release() }
         virtualDisplay = proj.createVirtualDisplay(
             "OBSmobile-Canvas",
             canvasWidth,
             canvasHeight,
-            densityDpi.coerceAtLeast(DisplayMetrics.DENSITY_MEDIUM),
+            lastDensityDpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             surface,
             null,

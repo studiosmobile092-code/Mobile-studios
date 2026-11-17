@@ -1,15 +1,12 @@
-import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
-
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
   // alias(libs.plugins.google.devtools.ksp)
   alias(libs.plugins.secrets)
-  alias(libs.plugins.google.services)
 }
 
-val enableLibObsNative =
-  project.hasProperty("withLibObs") ||
+val hasAndroidPortedLibObs =
+  file("src/main/jniLibs/arm64-v8a/libobs.so").exists() &&
     file("src/main/cpp/third_party/obs-studio/libobs/obs.h").exists()
 
 android {
@@ -25,12 +22,13 @@ android {
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-    buildConfigField("boolean", "LIBOBS_NATIVE_ENABLED", enableLibObsNative.toString())
+    buildConfigField("boolean", "LIBOBS_NATIVE_ENABLED", hasAndroidPortedLibObs.toString())
 
-    if (enableLibObsNative) {
-      ndk {
-        abiFilters += listOf("arm64-v8a")
-      }
+    ndk {
+      abiFilters += listOf("arm64-v8a")
+    }
+
+    if (hasAndroidPortedLibObs) {
       externalNativeBuild {
         cmake {
           cppFlags += listOf("-std=c++20", "-O2", "-fvisibility=hidden")
@@ -43,8 +41,9 @@ android {
     }
   }
 
-  if (enableLibObsNative) {
-    sourceSets["main"].jniLibs.srcDir("src/main/cpp/jniLibs")
+  sourceSets["main"].jniLibs.srcDirs("src/main/jniLibs")
+
+  if (hasAndroidPortedLibObs) {
     externalNativeBuild {
       cmake {
         path = file("src/main/cpp/CMakeLists.txt")
@@ -108,8 +107,6 @@ secrets {
   defaultPropertiesFileName = ".env.example"
   ignoreList.add("FIREBASE_APPCHECK_DEBUG_TOKEN")
 }
-
-googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
 
 dependencies {
   implementation(platform(libs.androidx.compose.bom))

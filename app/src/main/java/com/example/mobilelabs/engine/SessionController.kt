@@ -428,7 +428,7 @@ class SessionController(private val context: Context) {
             }
         ) { screenSurface, camSurface ->
             cameraSurfaceRef = camSurface
-            createVirtualDisplay(screenSurface, cfg.canvasWidth, cfg.canvasHeight)
+            createVirtualDisplay(screenSurface, displayWidthPx, displayHeightPx)
             syncCompositorScenes()
             syncActiveCameraSource()
         }
@@ -1191,7 +1191,17 @@ class SessionController(private val context: Context) {
                 val port = hostPort.substringAfter(':', "").toIntOrNull() ?: if (isTls) 443 else 1935
 
                 val startMs = System.currentTimeMillis()
-                val sock = if (isTls) SSLSocketFactory.getDefault().createSocket() else Socket()
+                val sock = if (isTls) {
+                    SSLSocketFactory.getDefault().createSocket().also { s ->
+                        (s as? javax.net.ssl.SSLSocket)?.let { ssl ->
+                            ssl.sslParameters = ssl.sslParameters.apply {
+                                endpointIdentificationAlgorithm = "HTTPS"
+                            }
+                        }
+                    }
+                } else {
+                    Socket()
+                }
                 sock.use { s ->
                     s.connect(InetSocketAddress(host, port), 4000)
                     s.soTimeout = 4000

@@ -5,7 +5,7 @@ import androidx.compose.runtime.Immutable
 
 enum class EngineBackendStatus(val label: String, val isLibObsLoaded: Boolean) {
     LIBOBS_NATIVE("libobs JNI + GLES3/MediaCodec", true),
-    ANDROID_HARDWARE_PIPELINE("Android GLES3/MediaCodec (libobs .so unbuilt in this APK)", false)
+    ANDROID_HARDWARE_PIPELINE("Android-Native GLES3 + MediaCodec Pipeline", false)
 }
 
 enum class SessionPhase(val displayLabel: String) {
@@ -473,7 +473,7 @@ data class DeviceAndCodecReport(
 @Immutable
 data class MobileLabsUiState(
     val engineBackend: EngineBackendStatus = EngineBackendStatus.ANDROID_HARDWARE_PIPELINE,
-    val libObsVersion: String = "32.2.1 (commit 57bfcf10a)",
+    val libObsVersion: String = "Android-Native Pipeline (MediaProjection + GLES3 + MediaCodec)",
     val appVersionLabel: String = "1.0.0-rc1",
     val sessionPhase: SessionPhase = SessionPhase.IDLE,
     val recordingPhase: RecordingPhase = RecordingPhase.IDLE,

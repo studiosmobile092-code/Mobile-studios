@@ -935,17 +935,18 @@ private fun ObsPreviewStage(
     onOpenDiagnostics: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Box(
+    BoxWithConstraints(
         modifier = modifier
             .background(ObsWindowBg)
             .padding(horizontal = 8.dp, vertical = 6.dp),
         contentAlignment = Alignment.Center
     ) {
         val canvasAspect = if (studioModeEnabled) 32f / 9f else 16f / 9f
+        val targetW = minOf(maxWidth, maxHeight * canvasAspect).coerceAtLeast(1.dp)
+        val targetH = (targetW / canvasAspect).coerceAtLeast(1.dp)
         Box(
             modifier = Modifier
-                .fillMaxHeight()
-                .aspectRatio(canvasAspect, matchHeightConstraintsFirst = true)
+                .size(targetW, targetH)
                 .background(Color.Black)
                 .border(1.dp, ObsBorder)
         ) {

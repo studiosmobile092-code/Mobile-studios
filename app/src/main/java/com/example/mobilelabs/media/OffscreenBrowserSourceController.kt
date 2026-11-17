@@ -41,6 +41,10 @@ class OffscreenBrowserSourceController(private val context: Context) {
         val webView: WebView,
         var lastCaptureMs: Long = 0L,
         val versionCounter: AtomicLong = AtomicLong(0L),
+        val frameLock: Any = Any(),
+        var bitmapA: Bitmap? = null,
+        var bitmapB: Bitmap? = null,
+        var frontIsA: Boolean = true,
         @Volatile var latestBitmap: Bitmap? = null
     )
 
@@ -90,11 +94,11 @@ class OffscreenBrowserSourceController(private val context: Context) {
             val toRemove = instances.keys.filter { !activeIds.containsKey(it) }
             toRemove.forEach { id ->
                 instances.remove(id)?.let { inst ->
+                    recycleInstanceBitmaps(inst)
                     runCatching {
                         inst.webView.stopLoading()
                         inst.webView.destroy()
                     }
-                    runCatching { inst.latestBitmap?.recycle() }
                 }
             }
 
@@ -134,9 +138,20 @@ class OffscreenBrowserSourceController(private val context: Context) {
 
     fun getLatestFrame(sourceId: String): BrowserFrameSnapshot? {
         val inst = instances[sourceId] ?: return null
-        val bmp = inst.latestBitmap ?: return null
-        if (bmp.isRecycled) return null
-        return BrowserFrameSnapshot(inst.versionCounter.get(), bmp)
+        synchronized(inst.frameLock) {
+            val bmp = inst.latestBitmap ?: return null
+            if (bmp.isRecycled) return null
+            return BrowserFrameSnapshot(inst.versionCounter.get(), bmp)
+        }
+    }
+
+    fun <T> withLockedLatestFrame(sourceId: String, reader: (version: Long, bitmap: Bitmap) -> T): T? {
+        val inst = instances[sourceId] ?: return null
+        return synchronized(inst.frameLock) {
+            val bmp = inst.latestBitmap
+            if (bmp == null || bmp.isRecycled) null
+            else reader(inst.versionCounter.get(), bmp)
+        }
     }
 
     fun releaseAll() {
@@ -144,13 +159,23 @@ class OffscreenBrowserSourceController(private val context: Context) {
         mainHandler.removeCallbacks(captureTick)
         mainHandler.post {
             instances.values.forEach { inst ->
+                recycleInstanceBitmaps(inst)
                 runCatching {
                     inst.webView.stopLoading()
                     inst.webView.destroy()
                 }
-                runCatching { inst.latestBitmap?.recycle() }
             }
             instances.clear()
+        }
+    }
+
+    private fun recycleInstanceBitmaps(inst: BrowserInstance) {
+        synchronized(inst.frameLock) {
+            inst.latestBitmap = null
+            runCatching { inst.bitmapA?.recycle() }
+            runCatching { inst.bitmapB?.recycle() }
+            inst.bitmapA = null
+            inst.bitmapB = null
         }
     }
 
@@ -194,21 +219,26 @@ class OffscreenBrowserSourceController(private val context: Context) {
     private fun captureWebViewBitmap(inst: BrowserInstance) {
         val w = inst.widthPx
         val h = inst.heightPx
-        val bmp = createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bmp)
-        if (!inst.transparentBg) {
-            canvas.drawColor(Color.BLACK)
+        val targetBmp = synchronized(inst.frameLock) {
+            val candidate = if (inst.frontIsA) inst.bitmapB else inst.bitmapA
+            if (candidate != null && !candidate.isRecycled && candidate.width == w && candidate.height == h) {
+                candidate
+            } else {
+                runCatching { candidate?.recycle() }
+                createBitmap(w, h, Bitmap.Config.ARGB_8888).also { created ->
+                    if (inst.frontIsA) inst.bitmapB = created else inst.bitmapA = created
+                }
+            }
         }
+        targetBmp.eraseColor(if (inst.transparentBg) Color.TRANSPARENT else Color.BLACK)
+        val canvas = Canvas(targetBmp)
         runCatching {
             inst.webView.draw(canvas)
-            val prev = inst.latestBitmap
-            inst.latestBitmap = bmp
-            inst.versionCounter.incrementAndGet()
-            if (prev != null && prev !== bmp && !prev.isRecycled) {
-                // Delayed safety: compositor copies into GL texture synchronously or checks isRecycled
+            synchronized(inst.frameLock) {
+                inst.frontIsA = !inst.frontIsA
+                inst.latestBitmap = targetBmp
+                inst.versionCounter.incrementAndGet()
             }
-        }.onFailure {
-            bmp.recycle()
         }
     }
 

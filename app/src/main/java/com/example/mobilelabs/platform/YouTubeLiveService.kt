@@ -3,6 +3,7 @@ package com.example.mobilelabs.platform
 import com.example.mobilelabs.model.PlatformChatMessage
 import com.example.mobilelabs.model.StreamingPlatform
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -205,6 +206,37 @@ class YouTubeLiveService(
             executeJson(req)
             Unit
         }
+    }
+
+    suspend fun waitForActiveStreamStatus(
+        accessToken: String,
+        broadcastId: String,
+        maxWaitMs: Long = 15_000L
+    ): Boolean = withContext(Dispatchers.IO) {
+        val deadline = System.currentTimeMillis() + maxWaitMs
+        while (System.currentTimeMillis() < deadline) {
+            val active = runCatching {
+                val bReq = Request.Builder()
+                    .url("$baseUrl/liveBroadcasts?part=contentDetails,status&id=$broadcastId")
+                    .header("Authorization", "Bearer $accessToken")
+                    .get()
+                    .build()
+                val bArr = executeJson(bReq).optJSONArray("items")
+                val item = if (bArr != null && bArr.length() > 0) bArr.optJSONObject(0) else null
+                val lifeCycle = item?.optJSONObject("status")?.optString("lifeCycleStatus").orEmpty()
+                if (lifeCycle == "live") return@withContext true
+                val streamId = item?.optJSONObject("contentDetails")?.optString("boundStreamId").orEmpty()
+                if (streamId.isNotBlank()) {
+                    val stream = findStreamById(accessToken, streamId)
+                    stream?.optJSONObject("status")?.optString("streamStatus") == "active"
+                } else {
+                    false
+                }
+            }.getOrDefault(false)
+            if (active) return@withContext true
+            delay(1500L)
+        }
+        false
     }
 
     suspend fun transitionBroadcast(

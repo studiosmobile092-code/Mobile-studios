@@ -14,6 +14,7 @@ import java.io.File
  */
 object ObsNativeJni {
     val isLibraryLoaded: Boolean by lazy {
+        if (!com.example.BuildConfig.LIBOBS_NATIVE_ENABLED) return@lazy false
         try {
             System.loadLibrary("obs")
             System.loadLibrary("mobilelabs_obs")
@@ -173,9 +174,9 @@ class ObsEngineBridge(private val context: Context) {
 
     fun getVersionString(): String {
         return if (nativeStarted && ObsNativeJni.isLibraryLoaded) {
-            runCatching { ObsNativeJni.nativeGetVersion() }.getOrDefault("32.2.1 (native)")
+            runCatching { ObsNativeJni.nativeGetVersion() }.getOrDefault("libobs native")
         } else {
-            "32.2.1 (pinned target · JNI ready)"
+            "Android-Native Pipeline (MediaProjection + GLES3 + MediaCodec)"
         }
     }
 

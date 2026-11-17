@@ -41,6 +41,7 @@ class PlatformConnectionCoordinator(
 
     private var youtubeChatJob: Job? = null
     private var twitchDevicePollJob: Job? = null
+    private var categorySearchJob: Job? = null
     private val seenChatIds = LinkedHashSet<String>(256)
 
     fun hydrateSavedConnections() {
@@ -328,11 +329,13 @@ class PlatformConnectionCoordinator(
     }
 
     fun searchTwitchCategories(query: String) {
+        categorySearchJob?.cancel()
         if (query.isBlank()) {
             uiState.update { it.copy(twitchCategories = emptyList()) }
             return
         }
-        scope.launch(Dispatchers.IO) {
+        categorySearchJob = scope.launch(Dispatchers.IO) {
+            delay(300L)
             val bundle = secretStore.loadPlatformBundle(StreamingPlatform.TWITCH) ?: return@launch
             val fresh = ensureFreshBundle(StreamingPlatform.TWITCH, bundle)
             val clientId = secretStore.resolveClientId(StreamingPlatform.TWITCH)
@@ -449,12 +452,18 @@ class PlatformConnectionCoordinator(
                             logEvent("YouTube Live RTMP ingest connected")
                             if (finalYt.broadcastId.isNotBlank()) {
                                 scope.launch(Dispatchers.IO) {
-                                    delay(3500L)
-                                    youtubeService.transitionBroadcast(
+                                    val ready = youtubeService.waitForActiveStreamStatus(
                                         finalYt.accessToken,
                                         finalYt.broadcastId,
-                                        "live"
+                                        maxWaitMs = 15_000L
                                     )
+                                    if (ready) {
+                                        youtubeService.transitionBroadcast(
+                                            finalYt.accessToken,
+                                            finalYt.broadcastId,
+                                            "live"
+                                        )
+                                    }
                                 }
                             }
                         },

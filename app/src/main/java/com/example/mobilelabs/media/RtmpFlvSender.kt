@@ -30,7 +30,8 @@ object RtmpProtocolParser {
             val commandName: String,
             val transactionId: Double,
             val statusCode: String,
-            val description: String
+            val description: String,
+            val resultNumber: Double = Double.NaN
         ) : IncomingMessage()
         data class Other(val msgTypeId: Int) : IncomingMessage()
     }
@@ -163,6 +164,7 @@ object RtmpProtocolParser {
 
         var cmdName = ""
         var txId = 0.0
+        var resultNumber = Double.NaN
         var statusCode = ""
         var description = ""
 
@@ -182,12 +184,54 @@ object RtmpProtocolParser {
             }
         }
 
+        // For _result / _error, skip command properties (null or object) and check optional numeric return arg (e.g. createStream streamId)
+        if (cmdName == "_result" && has(1)) {
+            when (payload[pos].toInt() and 0xFF) {
+                0x05, 0x06 -> pos += 1
+                0x03 -> {
+                    pos += 1
+                    while (pos + 2 < payload.size) {
+                        val keyLen = ((payload[pos].toInt() and 0xFF) shl 8) or (payload[pos + 1].toInt() and 0xFF)
+                        if (keyLen == 0 && pos + 2 < payload.size && (payload[pos + 2].toInt() and 0xFF) == 0x09) {
+                            pos += 3
+                            break
+                        }
+                        pos += 2 + keyLen
+                        if (pos >= payload.size) break
+                        when (payload[pos].toInt() and 0xFF) {
+                            0x00 -> pos += 9
+                            0x01 -> pos += 2
+                            0x02 -> {
+                                pos += 1
+                                readStr()
+                            }
+                            0x05, 0x06 -> pos += 1
+                            else -> {
+                                pos = payload.size
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+            if (has(9) && (payload[pos].toInt() and 0xFF) == 0x00) {
+                pos++
+                var bits = 0L
+                for (i in 0 until 8) {
+                    bits = (bits shl 8) or (payload[pos + i].toLong() and 0xFFL)
+                }
+                resultNumber = java.lang.Double.longBitsToDouble(bits)
+                pos += 8
+            }
+        }
+
         // Scan remaining AMF0 payload conservatively for "code" / "description" strings inside status object
-        val asAscii = String(payload, pos, (payload.size - pos).coerceAtLeast(0), Charsets.UTF_8)
+        val remStart = pos.coerceIn(0, payload.size)
+        val asAscii = String(payload, remStart, (payload.size - remStart).coerceAtLeast(0), Charsets.UTF_8)
         statusCode = extractAmfField(asAscii, "code")
         description = extractAmfField(asAscii, "description")
 
-        return IncomingMessage.AmfCommand(cmdName, txId, statusCode, description)
+        return IncomingMessage.AmfCommand(cmdName, txId, statusCode, description, resultNumber)
     }
 
     private fun extractAmfField(raw: String, key: String): String {
@@ -280,6 +324,7 @@ class RtmpFlvSender(
     private val flvVideoPrefix = ByteArray(5)
     private val flvAudioPrefix = ByteArray(2)
     private val chunkSize = 4096
+    @Volatile private var activeStreamId = 1
 
     fun start(videoSeqHeader: ByteArray?, audioSeqHeader: ByteArray?) {
         if (running.getAndSet(true)) return
@@ -359,7 +404,13 @@ class RtmpFlvSender(
         try {
             val parsed = parseRtmpUrl(baseUrl)
             val sock = if (parsed.isTls) {
-                SSLSocketFactory.getDefault().createSocket()
+                SSLSocketFactory.getDefault().createSocket().also { s ->
+                    (s as? javax.net.ssl.SSLSocket)?.let { ssl ->
+                        ssl.sslParameters = ssl.sslParameters.apply {
+                            endpointIdentificationAlgorithm = "HTTPS"
+                        }
+                    }
+                }
             } else {
                 Socket()
             }
@@ -374,6 +425,14 @@ class RtmpFlvSender(
             // RTMP Simple Handshake (C0 + C1 -> S0 + S1 + S2 -> C2)
             output.writeByte(0x03)
             val c1 = ByteArray(1536)
+            val uptimeSec = ((System.currentTimeMillis() / 1000L) and 0xFFFFFFFFL).toInt()
+            c1[0] = ((uptimeSec ushr 24) and 0xFF).toByte()
+            c1[1] = ((uptimeSec ushr 16) and 0xFF).toByte()
+            c1[2] = ((uptimeSec ushr 8) and 0xFF).toByte()
+            c1[3] = (uptimeSec and 0xFF).toByte()
+            val nonce = ByteArray(1528)
+            java.security.SecureRandom().nextBytes(nonce)
+            System.arraycopy(nonce, 0, c1, 8, nonce.size)
             output.write(c1)
             output.flush()
 
@@ -386,19 +445,11 @@ class RtmpFlvSender(
             output.write(s1)
             output.flush()
 
-            // Switch outgoing chunk size to 4096 bytes & issue connect -> createStream -> publish
-            synchronized(writeLock) {
-                sendSetChunkSize(output, chunkSize)
-                sendConnectChunk(output, parsed.app, baseUrl)
-                sendCreateStreamChunk(output)
-                sendPublishChunk(output, streamKey)
-                output.flush()
-            }
-
-            // Start active RTMP RX loop to verify publish ack AND answer Ping/WindowAck requests
+            val createStreamLatch = CountDownLatch(1)
             val publishLatch = CountDownLatch(1)
             val publishError = AtomicReference<String?>(null)
             val totalBytesReadApprox = AtomicLong(0L)
+            activeStreamId = 1
 
             readerThread = Thread({
                 val reader = RtmpProtocolParser.StreamReader(input)
@@ -427,6 +478,7 @@ class RtmpFlvSender(
                                 publishError.set(msg.description.ifBlank {
                                     msg.statusCode.ifBlank { "RTMP server rejected publish" }
                                 })
+                                createStreamLatch.countDown()
                                 publishLatch.countDown()
                             } else if (msg.commandName == "onStatus") {
                                 if (msg.statusCode.contains("Failed", true) ||
@@ -434,13 +486,18 @@ class RtmpFlvSender(
                                     msg.statusCode.contains("Rejected", true)
                                 ) {
                                     publishError.set(msg.description.ifBlank { msg.statusCode })
+                                    createStreamLatch.countDown()
                                     publishLatch.countDown()
                                 } else if (msg.statusCode.contains("Publish.Start", true)) {
                                     publishLatch.countDown()
                                 }
-                            } else if (msg.commandName == "_result" && msg.transactionId >= 2.0) {
-                                // createStream succeeded; some minimal RTMP servers send _result without NetStream.Publish.Start
-                                if (msg.transactionId >= 3.0) {
+                            } else if (msg.commandName == "_result") {
+                                if (msg.transactionId == 2.0) {
+                                    if (!msg.resultNumber.isNaN() && msg.resultNumber >= 1.0) {
+                                        activeStreamId = msg.resultNumber.toInt()
+                                    }
+                                    createStreamLatch.countDown()
+                                } else if (msg.transactionId >= 3.0) {
                                     publishLatch.countDown()
                                 }
                             }
@@ -450,9 +507,27 @@ class RtmpFlvSender(
                 }
                 if (running.get() && publishLatch.count > 0) {
                     publishError.compareAndSet(null, "RTMP server closed connection during handshake")
+                    createStreamLatch.countDown()
                     publishLatch.countDown()
                 }
             }, "MobileLabs-RTMP-Rx").apply { isDaemon = true; start() }
+
+            // Issue SetChunkSize + connect + createStream, wait for negotiated streamId, then publish
+            synchronized(writeLock) {
+                sendSetChunkSize(output, chunkSize)
+                sendConnectChunk(output, parsed.app, baseUrl)
+                sendCreateStreamChunk(output)
+                output.flush()
+            }
+
+            createStreamLatch.await(3000, TimeUnit.MILLISECONDS)
+            publishError.get()?.let { error(it) }
+            if (!running.get()) return
+
+            synchronized(writeLock) {
+                sendPublishChunk(output, streamKey, activeStreamId)
+                output.flush()
+            }
 
             val acknowledged = publishLatch.await(5000, TimeUnit.MILLISECONDS)
             val err = publishError.get()
@@ -466,13 +541,13 @@ class RtmpFlvSender(
             onConnected()
 
             synchronized(writeLock) {
-                sendMetadataChunk(output)
+                sendMetadataChunk(output, activeStreamId)
                 pendingVideoSeq?.let { seq ->
-                    writeFlvVideoTag(output, seq, 0L, isKey = true, isSeqHeader = true)
+                    writeFlvVideoTag(output, seq, 0L, isKey = true, isSeqHeader = true, streamId = activeStreamId)
                     videoSeqSent.set(true)
                 }
                 pendingAudioSeq?.let { seq ->
-                    writeFlvAudioTag(output, seq, 0L, isSeqHeader = true)
+                    writeFlvAudioTag(output, seq, 0L, isSeqHeader = true, streamId = activeStreamId)
                     audioSeqSent.set(true)
                 }
                 output.flush()
@@ -484,7 +559,7 @@ class RtmpFlvSender(
                 if (!videoSeqSent.get()) {
                     pendingVideoSeq?.let { seq ->
                         synchronized(writeLock) {
-                            writeFlvVideoTag(output, seq, 0L, isKey = true, isSeqHeader = true)
+                            writeFlvVideoTag(output, seq, 0L, isKey = true, isSeqHeader = true, streamId = activeStreamId)
                             videoSeqSent.set(true)
                             output.flush()
                         }
@@ -493,41 +568,34 @@ class RtmpFlvSender(
                 if (!audioSeqSent.get()) {
                     pendingAudioSeq?.let { seq ->
                         synchronized(writeLock) {
-                            writeFlvAudioTag(output, seq, 0L, isSeqHeader = true)
+                            writeFlvAudioTag(output, seq, 0L, isSeqHeader = true, streamId = activeStreamId)
                             audioSeqSent.set(true)
                             output.flush()
                         }
                     }
                 }
 
-                val pkt = queue.poll()
-                if (pkt == null) {
-                    Thread.sleep(4)
-                    continue
-                }
+                val pkt = queue.poll(15, TimeUnit.MILLISECONDS) ?: continue
                 queuedBytes.addAndGet(-pkt.payload.size.toLong())
 
-                if (pkt.isVideo && (!videoSeqSent.get() || (!hasSeenKeyframe && !pkt.isKey))) {
-                    continue
-                }
-                if (pkt.isVideo && needsKeyframeAfterDrop.get()) {
+                if (!hasSeenKeyframe) {
+                    if (!pkt.isVideo || !videoSeqSent.get() || !pkt.isKey) {
+                        continue
+                    }
+                    hasSeenKeyframe = true
+                    firstMediaPtsMs = pkt.timestampMs
+                } else if (pkt.isVideo && needsKeyframeAfterDrop.get()) {
                     if (!pkt.isKey) continue
                     needsKeyframeAfterDrop.set(false)
                 }
-                if (pkt.isVideo && pkt.isKey) {
-                    hasSeenKeyframe = true
-                }
 
-                if (firstMediaPtsMs < 0L) {
-                    firstMediaPtsMs = pkt.timestampMs
-                }
                 val relTs = (pkt.timestampMs - firstMediaPtsMs).coerceAtLeast(0L)
                 val writeStartMs = android.os.SystemClock.elapsedRealtime()
                 synchronized(writeLock) {
                     if (pkt.isVideo) {
-                        writeFlvVideoTag(output, pkt.payload, relTs, isKey = pkt.isKey, isSeqHeader = false)
+                        writeFlvVideoTag(output, pkt.payload, relTs, isKey = pkt.isKey, isSeqHeader = false, streamId = activeStreamId)
                     } else if (audioSeqSent.get()) {
-                        writeFlvAudioTag(output, pkt.payload, relTs, isSeqHeader = false)
+                        writeFlvAudioTag(output, pkt.payload, relTs, isSeqHeader = false, streamId = activeStreamId)
                     }
                     if (queue.isEmpty()) {
                         output.flush()
@@ -617,17 +685,17 @@ class RtmpFlvSender(
         writeRtmpChunk(out, csid = 3, msgTypeId = 20, streamId = 0, ts = 0, payload = amf.toByteArray())
     }
 
-    private fun sendPublishChunk(out: DataOutputStream, key: String) {
+    private fun sendPublishChunk(out: DataOutputStream, key: String, streamId: Int) {
         val amf = ByteArrayOutputStream()
         writeAmfString(amf, "publish")
         writeAmfNumber(amf, 3.0)
         amf.write(0x05)
         writeAmfString(amf, key)
         writeAmfString(amf, "live")
-        writeRtmpChunk(out, csid = 8, msgTypeId = 20, streamId = 1, ts = 0, payload = amf.toByteArray())
+        writeRtmpChunk(out, csid = 8, msgTypeId = 20, streamId = streamId, ts = 0, payload = amf.toByteArray())
     }
 
-    private fun sendMetadataChunk(out: DataOutputStream) {
+    private fun sendMetadataChunk(out: DataOutputStream, streamId: Int) {
         val amf = ByteArrayOutputStream()
         writeAmfString(amf, "@setDataFrame")
         writeAmfString(amf, "onMetaData")
@@ -644,9 +712,9 @@ class RtmpFlvSender(
         writeAmfNumProp(amf, "videodatarate", videoBitrateKbps.toDouble())
         writeAmfNumProp(amf, "audiocodecid", 10.0)
         writeAmfNumProp(amf, "audiodatarate", audioBitrateKbps.toDouble())
-        writeAmfProp(amf, "encoder", "Mobile Labs (libobs/MediaCodec)")
+        writeAmfProp(amf, "encoder", "Mobile Labs (MediaCodec/GLES3)")
         writeAmfObjectEnd(amf)
-        writeRtmpChunk(out, csid = 4, msgTypeId = 18, streamId = 1, ts = 0, payload = amf.toByteArray())
+        writeRtmpChunk(out, csid = 4, msgTypeId = 18, streamId = streamId, ts = 0, payload = amf.toByteArray())
     }
 
     private fun writeFlvVideoTag(
@@ -654,7 +722,8 @@ class RtmpFlvSender(
         payload: ByteArray,
         tsMs: Long,
         isKey: Boolean,
-        isSeqHeader: Boolean
+        isSeqHeader: Boolean,
+        streamId: Int = 1
     ) {
         flvVideoPrefix[0] = if (isKey) 0x17 else 0x27
         flvVideoPrefix[1] = if (isSeqHeader) 0x00 else 0x01
@@ -665,7 +734,7 @@ class RtmpFlvSender(
             out = out,
             csid = 6,
             msgTypeId = 9,
-            streamId = 1,
+            streamId = streamId,
             ts = tsMs,
             prefix = flvVideoPrefix,
             prefixLen = 5,
@@ -673,14 +742,20 @@ class RtmpFlvSender(
         )
     }
 
-    private fun writeFlvAudioTag(out: DataOutputStream, payload: ByteArray, tsMs: Long, isSeqHeader: Boolean) {
+    private fun writeFlvAudioTag(
+        out: DataOutputStream,
+        payload: ByteArray,
+        tsMs: Long,
+        isSeqHeader: Boolean,
+        streamId: Int = 1
+    ) {
         flvAudioPrefix[0] = 0xAF.toByte()
         flvAudioPrefix[1] = if (isSeqHeader) 0x00 else 0x01
         writeRtmpChunkWithPrefix(
             out = out,
             csid = 4,
             msgTypeId = 8,
-            streamId = 1,
+            streamId = streamId,
             ts = tsMs,
             prefix = flvAudioPrefix,
             prefixLen = 2,

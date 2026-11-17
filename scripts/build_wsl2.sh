@@ -22,20 +22,18 @@ if [ ! -f debug.keystore ]; then
     -dname "CN=Android Debug,O=Android,C=US"
 fi
 
-EXTRA_GRADLE_PROPS=""
-if [ -n "${ANDROID_NDK_HOME:-}" ] && [ "${BUILD_LIBOBS:-0}" = "1" ]; then
-  echo "Building pinned libobs native core..."
+if [ -n "${ANDROID_NDK_HOME:-}" ] && [ -n "${OBS_ANDROID_FORK_DIR:-}" ]; then
+  echo "Building Android-ported libobs native libraries into app/src/main/jniLibs/arm64-v8a..."
   bash scripts/fetch_and_build_obs.sh
-  EXTRA_GRADLE_PROPS="-PwithLibObs=true"
 else
-  echo "Building Android Kotlin/Compose + GLES3/MediaCodec APK (set BUILD_LIBOBS=1 with ANDROID_NDK_HOME for NDK libobs build)."
+  echo "Building unified Android-native Mobile Labs APK (MediaProjection + GLES3 + MediaCodec + RTMP)."
 fi
 
 rm -rf app/.cxx
 
-$GRADLE_CMD :app:testDebugUnitTest $EXTRA_GRADLE_PROPS --no-daemon
-$GRADLE_CMD :app:lintDebug $EXTRA_GRADLE_PROPS --no-daemon
-$GRADLE_CMD :app:assembleDebug $EXTRA_GRADLE_PROPS --no-daemon
+$GRADLE_CMD :app:testDebugUnitTest --no-daemon
+$GRADLE_CMD :app:lintDebug --no-daemon
+$GRADLE_CMD :app:assembleDebug --no-daemon
 
 APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
 if [ -f "$APK_PATH" ]; then

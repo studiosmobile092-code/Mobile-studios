@@ -733,9 +733,8 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
             GLES30.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
         }
 
-        val cfg = configRef.get()
         screenSurfaceTexture = SurfaceTexture(screenTexId).apply {
-            setDefaultBufferSize(cfg.canvasWidth, cfg.canvasHeight)
+            setDefaultBufferSize(sourceDisplayWidth, sourceDisplayHeight)
             setOnFrameAvailableListener({
                 screenFrameAvailable.set(true)
                 val now = SystemClock.elapsedRealtimeNanos()
@@ -1011,7 +1010,10 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
         applyFilterUniforms(locs, src, src.videoFilters, globalAlpha, sourceDisplayWidth, sourceDisplayHeight)
 
         val t = src.transform
-        val isCustomTransform = t.xFraction != 0f || t.yFraction != 0f || t.widthFraction != 1f || t.heightFraction != 1f || t.rotationDegrees != 0f
+        val isCustomTransform = t.xFraction != 0f || t.yFraction != 0f ||
+            t.widthFraction != 1f || t.heightFraction != 1f ||
+            t.rotationDegrees != 0f ||
+            t.cropLeft != 0f || t.cropTop != 0f || t.cropRight != 0f || t.cropBottom != 0f
         if (isCustomTransform) {
             drawTransformedQuad(src, u0 = t.cropLeft, v0 = t.cropBottom, u1 = 1f - t.cropRight, v1 = 1f - t.cropTop, xOffsetNdc = xOffsetNdc)
             return
@@ -1124,20 +1126,22 @@ class GlZeroCopyCompositor(private val appContext: Context? = null) {
     }
 
     private fun drawBrowserSource(src: SourceModel, globalAlpha: Float, xOffsetNdc: Float) {
-        val snap = browserController?.getLatestFrame(src.id) ?: return
+        val controller = browserController ?: return
         val key = "web|${src.id}"
-        val existing = textureCache[key]
-        val tex = if (existing != null && existing.version == snap.version) {
-            existing.lastUsedFrame = renderFrameCounter
-            existing
-        } else {
-            updateOrCreateDynamicTexture(
-                key = key,
-                version = snap.version,
-                bmp = snap.bitmap,
-                recycleAfterUpload = false
-            )
-        }
+        val tex = controller.withLockedLatestFrame(src.id) { ver, bmp ->
+            val existing = textureCache[key]
+            if (existing != null && existing.version == ver) {
+                existing.lastUsedFrame = renderFrameCounter
+                existing
+            } else {
+                updateOrCreateDynamicTexture(
+                    key = key,
+                    version = ver,
+                    bmp = bmp,
+                    recycleAfterUpload = false
+                )
+            }
+        } ?: return
         draw2dTexture(src, tex, globalAlpha, xOffsetNdc)
     }
 
