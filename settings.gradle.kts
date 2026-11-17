@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "MobileLabs"
+rootProject.name = "OBSmobile"
 
 include(":app")

@@ -1,14 +1,14 @@
 <resources>
-    <string name="app_name">Mobile Labs</string>
-    <string name="notif_channel_name">Mobile Labs Capture &amp; Stream</string>
+    <string name="app_name">OBSmobile</string>
+    <string name="notif_channel_name">OBSmobile Capture &amp; Stream</string>
     <string name="notif_channel_desc">Ongoing status and quick controls while capture, streaming, or recording is active.</string>
     <string name="action_stop_stream">Stop Stream</string>
     <string name="action_stop_record">Stop Record</string>
     <string name="action_stop_all">Disarm</string>
     <string name="rotate_to_landscape_title">Rotate to landscape</string>
-    <string name="rotate_to_landscape_body">Mobile Labs is designed for 16:10 landscape. Any active stream, recording, or overlay continues running safely.</string>
+    <string name="rotate_to_landscape_body">OBSmobile is designed for 16:10 landscape. Any active stream, recording, or overlay continues running safely.</string>
     <string name="overlay_permission_title">Floating Aperture Control</string>
-    <string name="overlay_permission_rationale">Allows Mobile Labs to show a compact draggable aperture button over your games so you can start or stop streaming and recording without leaving gameplay. Optional: you can always control outputs from the notification bar instead.</string>
+    <string name="overlay_permission_rationale">Allows OBSmobile to show a compact draggable aperture button over your games so you can start or stop streaming and recording without leaving gameplay. Optional: you can always control outputs from the notification bar instead.</string>
     <string name="overlay_next_scene">Next (%1$s)</string>
     <string name="action_pause_record">Pause Rec</string>
     <string name="action_resume_record">Resume Rec</string>
