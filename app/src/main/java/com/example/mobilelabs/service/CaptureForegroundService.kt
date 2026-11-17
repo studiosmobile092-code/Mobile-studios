@@ -207,7 +207,7 @@ class CaptureForegroundService : Service() {
         }
 
         mediaProjection = proj
-        // Must register callback BEFORE createVirtualDisplay on Android 14+ (§5.6)
+        // Must register callback BEFORE createVirtualDisplay on Android 14+
         proj.registerCallback(projectionCallback, mainHandler)
 
         val displayInfo = DisplayGeometryCompat.readDefaultDisplay(this)
@@ -231,7 +231,7 @@ class CaptureForegroundService : Service() {
     ) {
         runCatching { virtualDisplay?.release() }
         virtualDisplay = proj.createVirtualDisplay(
-            "MobileLabs-Canvas",
+            "OBSmobile-Canvas",
             canvasWidth,
             canvasHeight,
             densityDpi.coerceAtLeast(DisplayMetrics.DENSITY_MEDIUM),
@@ -299,10 +299,23 @@ class CaptureForegroundService : Service() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
+        val phaseLabel = when (sessionPhase) {
+            SessionPhase.LIVE -> "LIVE"
+            SessionPhase.CONNECTING -> "Connecting"
+            SessionPhase.RECONNECTING -> "Reconnecting"
+            SessionPhase.ARMED -> "Armed"
+            SessionPhase.ARMING -> "Arming"
+            else -> sessionPhase.displayLabel
+        }
+        val recLabel = when (recordingPhase) {
+            RecordingPhase.RECORDING -> "REC"
+            RecordingPhase.PAUSED -> "PAUSED"
+            else -> recordingPhase.displayLabel
+        }
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.mobile_labs_logo)
-            .setContentTitle("Mobile Labs · ${sessionPhase.displayLabel} | ${recordingPhase.displayLabel}")
-            .setContentText(statusMessage)
+            .setContentTitle("OBSmobile · $phaseLabel | $recLabel")
+            .setContentText(statusMessage.ifBlank { "Ready" })
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setContentIntent(openPending)
@@ -362,7 +375,7 @@ class CaptureForegroundService : Service() {
     }
 
     companion object {
-        const val CHANNEL_ID = "mobilelabs_capture_channel"
+        const val CHANNEL_ID = "obsmobile_capture_channel"
         const val NOTIF_ID = 7200
         const val ACTION_ARM_PROJECTION = "com.example.mobilelabs.ARM_PROJECTION"
         const val ACTION_STOP_STREAM = "com.example.mobilelabs.STOP_STREAM"
