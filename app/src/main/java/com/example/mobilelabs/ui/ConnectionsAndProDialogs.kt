@@ -197,7 +197,7 @@ fun ConnectionsAndMultiStreamDialog(
                                     accent = TwitchPurple,
                                     twitchCategories = state.twitchCategories,
                                     twitchDeviceAuth = state.twitchDeviceAuth,
-                                    onConnect = { onStartOAuth(StreamingPlatform.TWITCH) },
+                                    onConnect = onStartDeviceAuth
                                     onStartDeviceAuth = onStartTwitchDeviceAuth,
                                     onCancelDeviceAuth = onCancelTwitchDeviceAuth,
                                     onOpenExternalUrl = onOpenExternalUrl,
@@ -237,7 +237,7 @@ fun ConnectionsAndMultiStreamDialog(
                                     accent = TwitchPurple,
                                     twitchCategories = state.twitchCategories,
                                     twitchDeviceAuth = state.twitchDeviceAuth,
-                                    onConnect = { onStartOAuth(StreamingPlatform.TWITCH) },
+                                    onConnect = onStartDeviceAuth
                                     onStartDeviceAuth = onStartTwitchDeviceAuth,
                                     onCancelDeviceAuth = onCancelTwitchDeviceAuth,
                                     onOpenExternalUrl = onOpenExternalUrl,
@@ -310,7 +310,7 @@ fun ConnectionsAndMultiStreamDialog(
                             if (showClientIdConfig) {
                                 HorizontalDivider(color = ObsBorder)
                                 Text(
-                                    "Redirect URIs for OAuth App Setup — YouTube: com.mobilelabs.studio:/oauth2redirect · Twitch: mobilelabs://oauth2redirect",
+                                    "OAuth App Setup — YouTube redirect URI: com.mobilelabs.studio:/oauth2redirect · Twitch registration URI: http://localhost:3000 (Device Code sign-in does not use a redirect callback)",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = StatusWarn
                                 )
@@ -411,7 +411,7 @@ private fun PlatformDestinationCard(
                     text = if (conn.platform == StreamingPlatform.YOUTUBE) {
                         "Tap once to sign in with Google, create a Live Broadcast, and auto-fetch your RTMPS stream key."
                     } else {
-                        "Tap once to sign in with Twitch, auto-fetch your ingest stream key, and join Twitch live chat."
+                        "Connect with Twitch Device Code sign-in, auto-fetch your ingest stream key, and join Twitch live chat. No client secret is needed."
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = StudioTextDim
@@ -428,7 +428,7 @@ private fun PlatformDestinationCard(
                     Icon(Icons.Default.Link, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
                     Text(
-                        if (conn.authInProgress) "Waiting for browser..." else "1-Click Connect ${conn.platform.label}",
+                        if (conn.authInProgress) { if (conn.platform == StreamingPlatform.TWITCH) "Waiting for Twitch authorization..." else "Waiting for browser..." } else if (conn.platform == StreamingPlatform.TWITCH) "Connect Twitch (Device Code)" else "1-Click Connect YouTube",
                         color = Color.White,
                         fontWeight = FontWeight.SemiBold
                     )
@@ -466,18 +466,6 @@ private fun PlatformDestinationCard(
                                     ) { Text("Cancel", fontSize = 11.sp, color = StudioText) }
                                 }
                             }
-                        }
-                    } else {
-                        OutlinedButton(
-                            onClick = onStartDeviceAuth,
-                            enabled = !conn.authInProgress,
-                            border = BorderStroke(1.dp, accent.copy(alpha = 0.7f)),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(40.dp)
-                                .testTag("twitch_device_auth_btn")
-                        ) {
-                            Text("Quick TV / Device Code Sign-In", fontSize = 12.sp, color = StudioText)
                         }
                     }
                     if (!twitchDeviceAuth?.error.isNullOrBlank()) {
