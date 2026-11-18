@@ -99,6 +99,13 @@ class OAuthPkceManager(
     fun hasPendingAuth(): Boolean = loadPendingSession() != null
 
     fun launchOAuthLogin(platform: StreamingPlatform, clientId: String): Result<Unit> {
+        if (platform == StreamingPlatform.TWITCH) {
+            return Result.failure(
+                IllegalStateException(
+                    "Twitch uses Device Code sign-in in this Android app. Configure TWITCH_OAUTH_CLIENT_ID; no Twitch redirect callback or client secret is used."
+                )
+            )
+        }
         val trimmedId = clientId.trim()
         if (trimmedId.isBlank()) {
             return Result.failure(
@@ -197,6 +204,11 @@ class OAuthPkceManager(
         }
 
     private fun exchangeAuthorizationCode(session: PendingAuthSession, code: String): Result<TokenResult> {
+        if (session.platform == StreamingPlatform.TWITCH) {
+            return Result.failure(
+                IllegalStateException("Twitch authorization-code exchange is not used by this public Android client.")
+            )
+        }
         val tokenEndpoint = when (session.platform) {
             StreamingPlatform.YOUTUBE -> "https://oauth2.googleapis.com/token"
             StreamingPlatform.TWITCH -> "https://id.twitch.tv/oauth2/token"
