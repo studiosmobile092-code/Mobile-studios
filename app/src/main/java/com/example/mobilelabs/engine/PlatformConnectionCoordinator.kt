@@ -79,6 +79,12 @@ class PlatformConnectionCoordinator(
     }
 
     fun startPlatformOAuth(platform: StreamingPlatform) {
+        // Twitch's native/public-client flow is Device Code Grant. It needs only a Client ID,
+        // not a client secret or an app deep-link redirect URI.
+        if (platform == StreamingPlatform.TWITCH) {
+            startTwitchDeviceAuth()
+            return
+        }
         scope.launch {
             val clientId = secretStore.resolveClientId(platform)
             updatePlatformState(platform) { it.copy(authInProgress = true, errorReason = null) }
